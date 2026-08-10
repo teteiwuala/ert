@@ -5303,9 +5303,16 @@ if (typeof window !== 'undefined') {
     return (typeof t === 'number' && isFinite(t)) ? t : 0;
   }
 
+  // DEFINITIVE = the treatment that actually reverses the pathology (for
+  // anaphylaxis: epinephrine, and only epinephrine). Supportive-but-correct
+  // care (oxygen, fluids, positioning, stopping the trigger) must NOT count —
+  // treating `correct === true` as definitive made oxygen alone "stabilize" an
+  // anaphylaxis patient and falsely credited a time-to-epinephrine. The
+  // scenario marks the real ones with effect.definitive.
   function isDefinitiveIntervention(entry) {
     if (!entry) return false;
-    if (entry.definitive === true || entry.isDefinitive === true || entry.correct === true) return true;
+    if (entry.effect && entry.effect.definitive === true) return true;
+    if (entry.definitive === true || entry.isDefinitive === true) return true;
     var dn = scenario && (scenario.definitiveIntervention || scenario.definitiveTreatment);
     if (typeof dn === 'string' && entry.name &&
         String(entry.name).toLowerCase() === dn.toLowerCase()) return true;
@@ -5381,7 +5388,10 @@ if (typeof window !== 'undefined') {
     for (var i = 0; i < stages.length; i++) {
       var st = stages[i];
       if (applied[i]) continue;
-      if (stageTime(st) <= gameState.timeElapsedSeconds) {
+      // A fired curveball can bring the collapse deadline forward (difficult
+      // airway with no escalation): treat later untreated stages as due sooner.
+      var shift = (trajectory === 'untreated' && gameState.collapseShiftSeconds) || 0;
+      if (stageTime(st) - shift <= gameState.timeElapsedSeconds) {
         applied[i] = true;
         gameState.vitals = clampVitals(applyVitalChanges(gameState.vitals, st));
         if (st.dialogue || st.patientDialogue) dialogue = st.dialogue || st.patientDialogue;
@@ -5394,6 +5404,71 @@ if (typeof window !== 'undefined') {
     // exhausted is only meaningful when the trajectory actually has stages.
     exhausted = exhausted && stages.length > 0;
     return { dialogue: dialogue, cues: cues, critical: critical, exhausted: exhausted };
+  }
+
+  // ------------------------------------------------------------------
+  // Curveballs (offline engine). Only triggers that are unambiguous from
+  // state are implemented; the rest of curveballPool stays documentation for
+  // the educator review. Nothing here invents clinical values — effects are
+  // limited to (a) re-opening the untreated trajectory, (b) shortening the
+  // collapse deadline, both of which the scenario prose specifies.
+  // ------------------------------------------------------------------
+  function curveballById(id) {
+    var pool = (scenario && scenario.curveballPool) || [];
+    for (var i = 0; i < pool.length; i++) if (pool[i] && pool[i].id === id) return pool[i];
+    return null;
+  }
+  function maybeFireCurveball(commandText) {
+    if (!gameState) return null;
+    if (!gameState.curveballsFired) gameState.curveballsFired = [];
+    var fired = gameState.curveballsFired;
+    function already(id) { return fired.indexOf(id) !== -1; }
+
+    // wrong-dose-trap: a colleague offers 1:10,000 "cardiac epi" IV the moment
+    // epinephrine is first requested. Narrative prompt — the trap is answered
+    // by what the trainee does next (an iv-epinephrine-push match is already
+    // marked harmful in the scenario's interventions).
+    if (!already('wrong-dose-trap') && gameState.epinephrineGiven &&
+        gameState.epinephrineGivenAtSeconds === gameState.timeElapsedSeconds) {
+      var cb = curveballById('wrong-dose-trap');
+      if (cb) {
+        fired.push('wrong-dose-trap');
+        return {
+          id: 'wrong-dose-trap',
+          dialogue: '(A colleague appears at the bedside with a prefilled 10 mL syringe.) ' +
+                    '"I\'ve got cardiac epi here — 0.1 mg per mL. Want me to push the whole thing IV?"',
+          cues: ['A colleague offers a 10 mL prefilled syringe of epinephrine 0.1 mg/mL (1:10,000).'],
+          assessment: 'Concentration check: the IM dose is 1 mg/mL (1:1000). ' +
+                      'Confusing it with 1:10,000 cardiac epinephrine is a recognised cause of overdose — state the concentration you want.'
+        };
+      }
+    }
+
+    // difficult-airway: epinephrine still not given past 180 s. Escalation test —
+    // if airway help was already called, the team is en route; if not, the
+    // collapse deadline shortens by 60 s (per the scenario's stated effect).
+    if (!already('difficult-airway') && !gameState.epinephrineGiven &&
+        gameState.timeElapsedSeconds >= 180) {
+      var cb2 = curveballById('difficult-airway');
+      if (cb2) {
+        fired.push('difficult-airway');
+        // interventionsTaken records `name || id` — scenario entries have no
+        // `name`, so this is the intervention id (e.g. 'airway-expert').
+        var calledAirway = (gameState.interventionsTaken || []).some(function (i) {
+          return /airway|anaesth|anesth|call-for-help|rapid-response/i.test(String(i.name || i.id || ''));
+        });
+        if (!calledAirway) gameState.collapseShiftSeconds = 60;
+        return {
+          id: 'difficult-airway',
+          dialogue: '(His voice is gone — only a harsh crowing sound on each breath.)',
+          cues: ['Severe inspiratory stridor; lips and tongue grossly swollen; voice lost.'],
+          assessment: calledAirway
+            ? 'Airway help was already called and is on the way — that early escalation is exactly right.'
+            : 'The airway is closing and no airway expert has been called. Escalate now; time to collapse is shorter than it was.'
+        };
+      }
+    }
+    return null;
   }
 
   function scriptedTurn(commandText, advanceSeconds) {
@@ -5423,9 +5498,20 @@ if (typeof window !== 'undefined') {
           gameState.treatedAnchorSeconds = gameState.timeElapsedSeconds;
           assessmentParts.push('Correct: definitive treatment given — the patient should begin to improve.');
         } else if (entry.correct === false || entry.harmful === true) {
-          assessmentParts.push('Incorrect or harmful action for this presentation; deterioration continues.');
+          // Adjuncts (antihistamine, steroid) are not "harmful drugs" — they are
+          // wrong only as PRIMARY treatment. Say that precisely; a vague
+          // "harmful" teaches the wrong lesson about the drug itself.
+          if (entry.adjunctNotPrimary === true || /antihistamine|steroid|corticosteroid/i.test(String(entry.id || entry.name || ''))) {
+            assessmentParts.push('Adjunct only — it does not treat airway or circulatory collapse. ' +
+              'Epinephrine is the first-line treatment and has not been given; deterioration continues.');
+          } else {
+            assessmentParts.push('Incorrect or harmful action for this presentation; deterioration continues.');
+          }
+        } else if (gameState.epinephrineGiven) {
+          assessmentParts.push('Appropriate supportive care alongside epinephrine.');
         } else {
-          assessmentParts.push('Supportive measure taken; it helps but is not definitive treatment.');
+          assessmentParts.push('Useful supportive measure, but it does not reverse the reaction — ' +
+            'epinephrine is still owed and the trajectory is unchanged.');
         }
         if (entry.response || entry.dialogue) dialogue = entry.response || entry.dialogue;
         if (entry.cues || entry.visibleCues) cues = (entry.cues || entry.visibleCues).slice();
@@ -5435,6 +5521,19 @@ if (typeof window !== 'undefined') {
       if (!hasRationale(commandText)) {
         assessmentParts.push('No rationale was stated — justify each action.');
       }
+    }
+
+    // 1b. Curveballs — complications that fire from live state so the case
+    // can't be memorized. The scenario's curveballPool documents these in prose
+    // (trigger/effect/description, with citations); the two implemented here are
+    // the ones whose triggers are unambiguous. Each fires at most once, is
+    // recorded on gameState.curveballsFired for the debrief, and its clinical
+    // wording comes from the scenario entry rather than being invented here.
+    var cbFired = maybeFireCurveball(commandText);
+    if (cbFired) {
+      if (cbFired.dialogue) dialogue = cbFired.dialogue;
+      if (cbFired.cues) cues = cbFired.cues.slice();
+      assessmentParts.push(cbFired.assessment);
     }
 
     // 2. Apply time-based progression on the current trajectory.
@@ -5706,6 +5805,7 @@ if (typeof window !== 'undefined') {
       hiddenCondition: scenario ? scenario.hiddenCondition : null,
       timeElapsedSeconds: gameState.timeElapsedSeconds,
       interventionsTaken: gameState.interventionsTaken.slice(),
+      curveballsFired: (gameState.curveballsFired || []).slice(),
       epinephrineGiven: gameState.epinephrineGiven,
       epinephrineGivenAtSeconds: gameState.epinephrineGivenAtSeconds,
       finalVitals: clampVitals(gameState.vitals),
@@ -5829,6 +5929,7 @@ if (typeof window !== 'undefined') {
 
   window.PatientLoop = PatientLoop;
 })();
+
 </script>
 <script>
 /* =========================================================================
@@ -6610,9 +6711,58 @@ if (typeof window !== 'undefined') {
         'HR ' + v.hr + '  BP ' + v.sbp + '/' + v.dbp + '  SpO₂ ' + v.spo2 + '%  RR ' + v.rr + '  T ' + v.tempC + '°C'));
     }
 
+    // ---- Rubric scoring, hard-fails and the clinical timeline (AARDebrief) ----
+    var scored = null;
+    if (window.AARDebrief && window.AARDebrief.score) {
+      try {
+        scored = window.AARDebrief.score(summary, SCN);
+        var scoreBox = el('div', 'margin-top:16px;');
+        window.AARDebrief.renderInto(scoreBox, scored, summary, SCN);
+        card.appendChild(scoreBox);
+      } catch (err) { scored = null; }
+    }
+
     card.appendChild(el('div', 'opacity:.6;font-size:12px;margin-top:16px;',
       'Draft — clinical content pending review by a licensed educator.'));
-    var rowb = el('div', 'display:flex;gap:12px;justify-content:flex-end;margin-top:14px;');
+    var rowb = el('div', 'display:flex;gap:12px;flex-wrap:wrap;justify-content:flex-end;margin-top:14px;');
+
+    // Optional AI grading of the trainee's stated reasoning (needs a key).
+    if (window.AARDebrief && window.AARDebrief.gradeReasoning && hasKey()) {
+      var gradeBtn = btn('Grade my reasoning (AI)', false);
+      gradeBtn.onclick = function () {
+        gradeBtn.disabled = true; gradeBtn.textContent = 'Grading…';
+        window.AARDebrief.gradeReasoning(summary, SCN).then(function (grades) {
+          var gBox = el('div', 'margin-top:14px;');
+          window.AARDebrief.renderReasoning(gBox, grades);
+          card.insertBefore(gBox, rowb);
+          gradeBtn.textContent = 'Reasoning graded';
+        }).catch(function (e) {
+          gradeBtn.disabled = false; gradeBtn.textContent = 'Grade my reasoning (AI)';
+          toast(String((e && e.message) || 'Grading unavailable.'));
+        });
+      };
+      rowb.appendChild(gradeBtn);
+    }
+
+    // Export a session file the instructor dashboard can ingest.
+    if (window.AARDebrief && window.AARDebrief.exportSession) {
+      var expBtn = btn('Export session', false);
+      expBtn.onclick = function () {
+        try {
+          var classCode = null;
+          try { classCode = localStorage.getItem('nurse-sim-class-code'); } catch (e2) {}
+          var data = window.AARDebrief.exportSession(summary, scored, SCN, { classCode: classCode });
+          var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'nurse-vr-session-' + Date.now() + '.json';
+          document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+        } catch (e3) { toast('Export failed.'); }
+      };
+      rowb.appendChild(expBtn);
+    }
+
     var again = btn('Run again', false);
     again.onclick = function () { clear(root()); if (!hasKey()) showKeyGate(showBrief); else showBrief(); };
     var done = btn('Back to hub', true);
@@ -9352,6 +9502,1909 @@ if (typeof window !== 'undefined') {
     };
 
     return fx;
+  };
+})();
+
+</script>
+<script>
+/*
+ * =============================================================================
+ *  AAR DEBRIEF ENGINE — scoring + after-action-review for the nurse VR hub
+ * =============================================================================
+ *  Self-contained browser module (vanilla JS IIFE -> window.AARDebrief).
+ *  Consumes:
+ *    - the end-summary object produced by PatientLoop.onEnd:
+ *        { outcome:'arrest'|'stabilized'|'ended', hiddenCondition,
+ *          timeElapsedSeconds, interventionsTaken:[{name, atSeconds}],
+ *          epinephrineGiven, epinephrineGivenAtSeconds, finalVitals,
+ *          degraded, transcript:[{role:'nurse'|'patient'|'assessment', text}] }
+ *    - a scenario object shaped like ANAPHYLAXIS_SCENARIO (scoringRubric,
+ *      interventions, progressionRules.untreated/treated, hiddenCondition).
+ *
+ *  API:
+ *    AARDebrief.score(summary, scenario)              -> result object
+ *    AARDebrief.renderInto(el, result, summary, sc)   -> DOM debrief
+ *    AARDebrief.gradeReasoning(summary, scenario)     -> Promise<grades>
+ *    AARDebrief.renderReasoning(el, grades)           -> DOM renderer
+ *    AARDebrief.exportSession(summary, result, sc, x) -> plain object
+ *
+ *  DRAFT scoring — clinical weighting pending review by a licensed educator.
+ *  Nothing here throws on missing/partial data; every accessor is guarded.
+ * =============================================================================
+ */
+(function (root) {
+  'use strict';
+
+  var VERSION = '0.1.0';
+
+  /* ==========================================================================
+   * KEYWORD HEURISTICS — THE ONE TABLE AN EDUCATOR TUNES
+   * --------------------------------------------------------------------------
+   * Keyed by scoringRubric criterion id. All matching is lowercase-substring
+   * over the nurse's typed commands + rationales (the 'nurse' transcript
+   * entries). Fields:
+   *   keywords      : hits here count toward full credit
+   *   minFull       : distinct keyword hits needed for FULL credit (default 1)
+   *   halfKeywords  : weaker evidence -> half credit if no full match
+   *   interventions : taking any of these intervention ids ALSO earns full
+   *                   credit (action is evidence even without verbalization)
+   *   detailKeywords: (respond-epi-correct only) dose/route/site specifics
+   * ========================================================================== */
+  var HEURISTICS = {
+    'notice-skin-airway': {
+      keywords: ['itch', 'hive', 'urticaria', 'wheal', 'flush', 'rash',
+                 'swell', 'tongue', 'lip', 'hoarse', 'stridor', 'throat',
+                 'airway', 'angioedema', 'wheez', 'skin'],
+      minFull: 2
+    },
+    'notice-infusion-link': {
+      keywords: ['cefazolin', 'antibiotic', 'infusion', 'drip', 'ancef',
+                 'trigger', 'allergen', 'the drug', 'iv med', 'went up',
+                 'started right after', 'still running'],
+      minFull: 1,
+      interventions: ['stop-infusion']
+    },
+    'notice-vitals-trend': {
+      keywords: ['vitals', 'monitor', 'blood pressure', 'bp ', 'bp is',
+                 'sats', 'spo2', 'heart rate', 'pulse', 'trend', 'tachycard',
+                 'hypotens', 'dropping', 'falling', 'rising', 'climbing',
+                 'getting worse', 'resp rate'],
+      minFull: 1,
+      interventions: ['full-vitals-monitor']
+    },
+    'interpret-anaphylaxis': {
+      keywords: ['anaphyla'],                        // "anaphylaxis"/"anaphylactic"
+      minFull: 1,
+      halfKeywords: ['allergic reaction', 'allergy', 'severe reaction',
+                     'reaction to the']              // rubric: "allergic reaction" alone is partial
+    },
+    'interpret-rationale-epi': {
+      keywords: ['vasodilat', 'vasoconstrict', 'capillary leak',
+                 'bronchospasm', 'first-line', 'first line', 'definitive',
+                 'reverses', 'only treatment', 'only drug', 'airway edema',
+                 'antihistamines can', 'antihistamine won', 'alpha', 'beta',
+                 'shock', 'buys', 'stops the reaction'],
+      minFull: 1
+    },
+    'respond-reassess-repeat': {
+      keywords: ['reassess', 'repeat the epi', 'repeat epi', 'second dose',
+                 '5 minutes', 'five minutes', 'biphasic', 'observe',
+                 'observation', 'keep monitoring', 'watch for', 'recheck'],
+      minFull: 1,
+      interventions: ['epinephrine-repeat']
+    },
+    // Not a criterion: dose/route/site specifics that upgrade respond-epi-correct.
+    'epi-detail': {
+      keywords: ['0.5', '1 mg/ml', '1mg/ml', '1:1000', 'thigh', 'vastus',
+                 'anterolateral', 'intramuscular', ' im ', 'im into', 'im epi']
+    },
+    // Free-text patterns that suggest a wrong epinephrine dose/concentration
+    // (hard-fail #6). Deliberately conservative (must not match the correct
+    // "0.5 mg" order); usually "not assessable".
+    'wrong-epi-dose': {
+      keywords: ['give 5 mg', 'push 5 mg', '5 mg of epi', '5mg of epi',
+                 'five milligrams', 'whole syringe', 'push the whole',
+                 '1:10 000 iv', '1:10000 iv', '10 ml of epi']
+    }
+  };
+
+  // Intervention ids composing the "supportive bundle" criterion.
+  var SUPPORTIVE_BUNDLE = ['call-for-help', 'position-supine-legs-raised',
+                           'high-flow-oxygen', 'iv-fluid-bolus'];
+
+  /* ------------------------------------------------------------- utilities */
+  function isNum(v) { return typeof v === 'number' && isFinite(v); }
+  function arr(v)   { return Array.isArray(v) ? v : []; }
+  function str(v)   { return typeof v === 'string' ? v : ''; }
+  function norm(s) {
+    return str(s).toLowerCase().replace(/[^a-z0-9\s:./%-]/g, ' ')
+                 .replace(/\s+/g, ' ').trim();
+  }
+  // Like norm() but preserves deliberate edge spaces on keywords
+  // (e.g. ' im ' must only match the standalone word).
+  function normKw(s) {
+    return str(s).toLowerCase().replace(/[^a-z0-9\s:./%-]/g, ' ')
+                 .replace(/\s+/g, ' ');
+  }
+  function fmtTime(t) {
+    if (!isNum(t)) return '--:--';
+    var m = Math.floor(t / 60), s = Math.round(t % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  /* ------------------------------------------ nurse-text corpus + matching */
+  function nurseText(summary) {
+    var out = [];
+    arr(summary && summary.transcript).forEach(function (e) {
+      if (e && e.role === 'nurse' && str(e.text)) out.push(str(e.text));
+    });
+    return out;
+  }
+  function corpusOf(summary) {
+    // padded with spaces so keywords like ' im ' can match at edges
+    return ' ' + norm(nurseText(summary).join(' ; ')) + ' ';
+  }
+  function keywordHits(corpus, keywords) {
+    var hits = [];
+    arr(keywords).forEach(function (k) {
+      var nk = normKw(k);
+      if (nk.trim() && corpus.indexOf(nk) !== -1) hits.push(k.trim());
+    });
+    return hits;
+  }
+
+  /* ----------------------------------------------- intervention resolution */
+  // Map each interventionsTaken entry (free-text name) to a scenario
+  // intervention id via id/label/alias matching. Returns:
+  //   { byId: {id -> earliest atSeconds}, entries: [{name, atSeconds, id, correct}] }
+  function resolveInterventions(summary, scenario) {
+    var defs = arr(scenario && scenario.interventions);
+    var byId = {}, entries = [];
+    arr(summary && summary.interventionsTaken).forEach(function (tk) {
+      if (!tk) return;
+      var name = norm(tk.name), at = isNum(tk.atSeconds) ? tk.atSeconds : null;
+      var best = null, bestScore = 0;
+      defs.forEach(function (d) {
+        if (!d || !d.id) return;
+        var cands = [d.id, d.label].concat(arr(d.aliases));
+        cands.forEach(function (c) {
+          var nc = norm(c);
+          if (!nc || nc.length < 3) return;
+          var s = 0;
+          if (name === nc) s = 3;
+          else if (nc.length >= 4 && name.indexOf(nc) !== -1) s = 2;
+          else if (name.length >= 4 && nc.indexOf(name) !== -1) s = 1;
+          if (s > bestScore) { bestScore = s; best = d; }
+        });
+      });
+      var id = best ? best.id : null;
+      entries.push({ name: str(tk.name), atSeconds: at, id: id,
+                     correct: best ? best.correct !== false : null });
+      if (id != null && (byId[id] === undefined ||
+          (at != null && (byId[id] === null || at < byId[id])))) {
+        byId[id] = at;
+      }
+    });
+    return { byId: byId, entries: entries };
+  }
+  function takenAt(res, id) { return res.byId.hasOwnProperty(id) ? res.byId[id] : undefined; }
+  function wasTaken(res, id) { return res.byId.hasOwnProperty(id); }
+
+  /* ================================================================ SCORE */
+  function score(summary, scenario) {
+    summary = summary || {}; scenario = scenario || {};
+    var rubric = scenario.scoringRubric || {};
+    var target = isNum(rubric.timeToEpinephrineTargetSeconds)
+               ? rubric.timeToEpinephrineTargetSeconds : 120;
+    var corpus = corpusOf(summary);
+    var hasText = corpus.trim().length > 0;
+    var res = resolveInterventions(summary, scenario);
+    var elapsed = isNum(summary.timeElapsedSeconds) ? summary.timeElapsedSeconds : null;
+    var epiGiven = summary.epinephrineGiven === true;
+    var epiAt = isNum(summary.epinephrineGivenAtSeconds)
+              ? summary.epinephrineGivenAtSeconds : null;
+    // If the loop flagged epi given but no timestamp, fall back to resolved actions.
+    if (epiGiven && epiAt === null) {
+      var a = takenAt(res, 'epinephrine-im');
+      if (a === undefined) a = takenAt(res, 'epinephrine-autoinjector');
+      if (isNum(a)) epiAt = a;
+    }
+
+    /* -------- per-criterion evaluation -------- */
+    function evalKeywordCriterion(c, h) {
+      // intervention evidence first (an action speaks for itself)
+      var ivHit = null;
+      arr(h.interventions).some(function (id) {
+        if (wasTaken(res, id)) { ivHit = id; return true; } return false;
+      });
+      if (ivHit) {
+        return { earned: c.points, assessed: true,
+                 evidence: 'Action taken: ' + ivHit };
+      }
+      if (!hasText) {
+        return { earned: 0, assessed: false,
+                 evidence: 'No nurse commands/rationales recorded — cannot assess from data.' };
+      }
+      var hits = keywordHits(corpus, h.keywords);
+      var minFull = isNum(h.minFull) ? h.minFull : 1;
+      if (hits.length >= minFull) {
+        return { earned: c.points, assessed: true,
+                 evidence: 'Verbalized: "' + hits.slice(0, 4).join('", "') + '"' };
+      }
+      if (hits.length > 0) {
+        return { earned: Math.round(c.points / 2), assessed: true,
+                 evidence: 'Partial — mentioned "' + hits.join('", "') + '" (needs ' + minFull + '+ cues for full credit)' };
+      }
+      var half = keywordHits(corpus, h.halfKeywords);
+      if (half.length > 0) {
+        return { earned: Math.round(c.points / 2), assessed: true,
+                 evidence: 'Partial — said "' + half[0] + '" but not the specific working diagnosis/mechanism.' };
+      }
+      return { earned: 0, assessed: true, evidence: 'No matching evidence in commands or rationales.' };
+    }
+
+    function evalRespond(c) {
+      var id = c.id;
+      if (id === 'respond-stop-trigger') {
+        var t = takenAt(res, 'stop-infusion');
+        if (t !== undefined) {
+          return { earned: c.points, assessed: true,
+                   evidence: 'Infusion stopped at ' + fmtTime(t) + '.' };
+        }
+        return { earned: 0, assessed: true, evidence: 'Cefazolin infusion never stopped.' };
+      }
+      if (id === 'respond-epi-correct') {
+        if (!epiGiven) {
+          return { earned: 0, assessed: true, evidence: 'Epinephrine never given.' };
+        }
+        var detail = keywordHits(corpus, (HEURISTICS['epi-detail'] || {}).keywords);
+        var detailNote = detail.length
+          ? ' Dose/route detail verbalized ("' + detail.slice(0, 3).join('", "') + '").'
+          : ' Dose/concentration/route/site not verbalized — full credit needs them stated.';
+        if (epiAt !== null && epiAt <= target) {
+          var full = detail.length > 0;
+          return { earned: full ? c.points : Math.round(c.points * 0.75), assessed: true,
+                   evidence: 'IM epinephrine at ' + fmtTime(epiAt) + ' (target ' +
+                             fmtTime(target) + ').' + detailNote };
+        }
+        if (epiAt !== null && epiAt <= 240) {
+          return { earned: Math.round(c.points / 2), assessed: true,
+                   evidence: 'Epinephrine given at ' + fmtTime(epiAt) +
+                             ' — after the ' + fmtTime(target) + ' target but before the 4-min hard-fail line.' + detailNote };
+        }
+        if (epiAt !== null) {
+          return { earned: Math.round(c.points / 4), assessed: true,
+                   evidence: 'Epinephrine given very late (' + fmtTime(epiAt) + ').' + detailNote };
+        }
+        return { earned: Math.round(c.points / 2), assessed: true,
+                 evidence: 'Epinephrine given but timing not recorded.' };
+      }
+      if (id === 'respond-supportive-bundle') {
+        var got = SUPPORTIVE_BUNDLE.filter(function (bid) { return wasTaken(res, bid); });
+        var frac = got.length / SUPPORTIVE_BUNDLE.length;
+        return { earned: Math.round(c.points * frac), assessed: true,
+                 evidence: got.length
+                   ? 'Supportive actions taken: ' + got.join(', ') + ' (' + got.length + '/' + SUPPORTIVE_BUNDLE.length + ').'
+                   : 'No supportive-bundle actions (help / positioning / oxygen / fluids) recorded.' };
+      }
+      if (id === 'respond-reassess-repeat') {
+        var h = HEURISTICS[id] || {};
+        var kw = evalKeywordCriterion(c, h);
+        if (kw.assessed && kw.earned > 0) return kw;
+        // A run that ended before the 5-minute mark never gave the trainee a
+        // chance to reassess — don't punish, mark unassessable.
+        if (elapsed !== null && elapsed < 300 && summary.outcome !== 'arrest') {
+          return { earned: 0, assessed: false,
+                   evidence: 'Run ended before the 5-minute reassessment window.' };
+        }
+        return kw;
+      }
+      // Unknown respond criterion: try a heuristics entry, else unassessable.
+      var hh = HEURISTICS[id];
+      if (hh) return evalKeywordCriterion(c, hh);
+      return { earned: 0, assessed: false, evidence: 'No evaluator for this criterion.' };
+    }
+
+    var criteria = arr(rubric.criteria).map(function (c) {
+      c = c || {};
+      var pts = isNum(c.points) ? c.points : 0;
+      var cc = { id: str(c.id), descriptor: str(c.descriptor),
+                 dimension: str(c.dimension), points: pts };
+      var r;
+      try {
+        if (cc.dimension === 'respond') r = evalRespond(cc);
+        else {
+          var h = HEURISTICS[cc.id];
+          r = h ? evalKeywordCriterion(cc, h)
+                : { earned: 0, assessed: false, evidence: 'No heuristic table entry for this criterion.' };
+        }
+      } catch (e) {
+        r = { earned: 0, assessed: false, evidence: 'Evaluator error: ' + e.message };
+      }
+      cc.earned = Math.max(0, Math.min(pts, isNum(r.earned) ? r.earned : 0));
+      cc.assessed = r.assessed === true;
+      cc.evidence = str(r.evidence);
+      return cc;
+    });
+
+    var totalPoints = 0, maxAssessedPoints = 0;
+    criteria.forEach(function (c) {
+      if (c.assessed) { totalPoints += c.earned; maxAssessedPoints += c.points; }
+    });
+
+    /* -------- hard fails -------- */
+    var hardFails = [];
+    function fail(rule, triggered, detail) {
+      hardFails.push({ rule: rule, triggered: triggered === true, detail: str(detail) });
+    }
+    // 1. antihistamine / corticosteroid as primary (before any epinephrine)
+    (function () {
+      var offenders = [];
+      ['antihistamine', 'corticosteroid'].forEach(function (id) {
+        var t = takenAt(res, id);
+        if (t === undefined) return;
+        var beforeEpi = !epiGiven || (isNum(t) && epiAt !== null && t < epiAt) ||
+                        (epiAt === null && epiGiven === false);
+        if (!epiGiven || (isNum(t) && (epiAt === null || t < epiAt))) offenders.push(id + ' at ' + fmtTime(t));
+        else if (beforeEpi) offenders.push(id);
+      });
+      fail('antihistamine-or-steroid-as-primary', offenders.length > 0,
+           offenders.length
+             ? 'Second-line drug given before/without epinephrine: ' + offenders.join(', ') + '. Antihistamines/steroids never substitute for epinephrine (AAAAI/ACAAI 2020; RCUK 2021).'
+             : 'No antihistamine or corticosteroid given before epinephrine.');
+    })();
+    // 2. epinephrine delayed beyond 240 s (or never, on a long-enough run)
+    (function () {
+      var trig = false, detail;
+      if (epiGiven && epiAt !== null && epiAt > 240) {
+        trig = true; detail = 'Epinephrine at ' + fmtTime(epiAt) + ' — beyond the 240 s deadline (arrest at 360 s untreated; Pumphrey 2000).';
+      } else if (!epiGiven && (summary.outcome === 'arrest' || (elapsed !== null && elapsed > 240))) {
+        trig = true; detail = 'Epinephrine never given; scenario ran ' + fmtTime(elapsed) + (summary.outcome === 'arrest' ? ' and ended in arrest.' : '.');
+      } else {
+        detail = epiGiven ? 'Epinephrine within the 240 s window.' : 'Run ended before the 240 s deadline could be judged.';
+      }
+      fail('epinephrine-delayed-beyond-240s', trig, detail);
+    })();
+    // 3. infusion never stopped
+    (function () {
+      var stopped = wasTaken(res, 'stop-infusion');
+      var judgeable = summary.outcome === 'arrest' || (elapsed !== null && elapsed >= 180);
+      fail('infusion-never-stopped', !stopped && judgeable,
+           stopped ? 'Cefazolin infusion was stopped.'
+                   : (judgeable ? 'The running cefazolin infusion (the active trigger) was never stopped.'
+                                : 'Run too short to judge; infusion not stopped before it ended.'));
+    })();
+    // 4. IV push epinephrine with a pulse
+    fail('iv-epinephrine-push', wasTaken(res, 'iv-epinephrine-push'),
+         wasTaken(res, 'iv-epinephrine-push')
+           ? 'IV bolus epinephrine given in a patient with a pulse (wrong-dose trap accepted).'
+           : 'No IV-push epinephrine.');
+    // 5. sat/stood the patient upright
+    fail('fatal-posture-upright', wasTaken(res, 'sit-patient-upright'),
+         wasTaken(res, 'sit-patient-upright')
+           ? 'Patient sat/stood upright while hypotensive (fatal-posture error — Pumphrey 2003).'
+           : 'Patient not sat or stood upright.');
+    // 6. wrong dose/concentration verbalized (free-text scan; usually unassessable)
+    (function () {
+      var hits = hasText ? keywordHits(corpus, (HEURISTICS['wrong-epi-dose'] || {}).keywords) : [];
+      fail('wrong-epi-dose-stated', hits.length > 0,
+           hits.length ? 'Possible wrong dose/concentration verbalized: "' + hits.join('", "') + '" — review transcript.'
+                       : 'No wrong-dose language detected (limited free-text check — not fully assessable from data).');
+    })();
+
+    /* -------- timeline: actions + clinical phases, chronological -------- */
+    var timeline = [];
+    res.entries.forEach(function (e) {
+      timeline.push({ t: isNum(e.atSeconds) ? e.atSeconds : 0, kind: 'action',
+                      label: e.name + (e.id ? '' : ' (unrecognized)'),
+                      good: e.correct === null ? null : e.correct });
+    });
+    var prog = scenario.progressionRules || {};
+    var phaseCutoff = (epiAt !== null) ? epiAt : (elapsed !== null ? elapsed : Infinity);
+    arr(prog.untreated).forEach(function (st) {
+      if (!st || !isNum(st.atSeconds)) return;
+      if (st.atSeconds > phaseCutoff && st.atSeconds !== 0) return;
+      var cue = arr(st.cues)[0] || st.dialogue || 'Clinical stage';
+      timeline.push({ t: st.atSeconds, kind: 'phase', label: str(cue), good: null });
+    });
+    if (epiAt !== null) {
+      arr(prog.treated).forEach(function (st) {
+        if (!st || !isNum(st.atSeconds)) return;
+        var t = epiAt + st.atSeconds;
+        if (elapsed !== null && t > elapsed) return;
+        var cue = arr(st.cues)[0] || st.dialogue || 'Recovery stage';
+        timeline.push({ t: t, kind: 'phase', label: str(cue), good: null });
+      });
+    }
+    timeline.sort(function (a, b) { return a.t - b.t; });
+
+    return {
+      totalPoints: totalPoints,
+      maxAssessedPoints: maxAssessedPoints,
+      criteria: criteria,
+      hardFails: hardFails,
+      timeline: timeline,
+      meta: {
+        version: VERSION,
+        outcome: str(summary.outcome) || 'unknown',
+        timeElapsedSeconds: elapsed,
+        epinephrineGivenAtSeconds: epiAt,
+        timeToEpinephrineTargetSeconds: target,
+        degraded: summary.degraded === true
+      }
+    };
+  }
+
+  /* =========================================================== RENDERING */
+  var C = {                       // app theme (matches nurse-vr-hub)
+    cyan: '#00e5ff', amber: '#ffb020', red: '#ff3b3b', green: '#7fffd0',
+    ink: '#cfe9f2', dim: '#7fa8b8',
+    glass: 'rgba(10,25,35,0.85)', line: 'rgba(0,229,255,0.25)'
+  };
+  var FONT = "system-ui,-apple-system,'Segoe UI',sans-serif";
+
+  function el(doc, tag, styles, text) {
+    var n = doc.createElement(tag);
+    if (styles) for (var k in styles) { try { n.style[k] = styles[k]; } catch (e) {} }
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function sectionTitle(doc, label) {
+    return el(doc, 'div', {
+      color: C.cyan, font: '600 11px ' + FONT, letterSpacing: '2px',
+      textTransform: 'uppercase', margin: '18px 0 8px', borderBottom: '1px solid ' + C.line,
+      paddingBottom: '4px'
+    }, label);
+  }
+
+  function renderInto(containerEl, result, summary, scenario) {
+    try {
+      if (!containerEl || !containerEl.appendChild || !containerEl.ownerDocument) return;
+      var doc = containerEl.ownerDocument;
+      result = result || {}; summary = summary || {}; scenario = scenario || {};
+      var meta = result.meta || {};
+
+      var wrap = el(doc, 'div', {
+        background: C.glass, border: '1px solid ' + C.line, borderRadius: '12px',
+        padding: '18px 20px', color: C.ink, fontFamily: FONT, fontSize: '13px',
+        lineHeight: '1.5', maxWidth: '760px'
+      });
+
+      /* score header */
+      var outcome = str(summary.outcome) || str(meta.outcome) || 'unknown';
+      var ocColor = outcome === 'stabilized' ? C.green : (outcome === 'arrest' ? C.red : C.amber);
+      var head = el(doc, 'div', { display: 'flex', alignItems: 'baseline', gap: '14px', flexWrap: 'wrap' });
+      head.appendChild(el(doc, 'div', { font: '700 26px ' + FONT, color: C.cyan },
+        (isNum(result.totalPoints) ? result.totalPoints : 0) + ' / ' +
+        (isNum(result.maxAssessedPoints) ? result.maxAssessedPoints : 0) + ' pts'));
+      head.appendChild(el(doc, 'div', { font: '600 14px ' + FONT, color: ocColor, textTransform: 'uppercase', letterSpacing: '1px' },
+        'Outcome: ' + outcome));
+      if (isNum(meta.timeElapsedSeconds)) {
+        head.appendChild(el(doc, 'div', { color: C.dim }, 'Run time ' + fmtTime(meta.timeElapsedSeconds)));
+      }
+      if (isNum(meta.epinephrineGivenAtSeconds)) {
+        head.appendChild(el(doc, 'div', { color: C.dim },
+          'Epinephrine at ' + fmtTime(meta.epinephrineGivenAtSeconds) +
+          ' (target ' + fmtTime(meta.timeToEpinephrineTargetSeconds) + ')'));
+      }
+      wrap.appendChild(head);
+
+      /* hard-fail banners */
+      var trig = arr(result.hardFails).filter(function (f) { return f && f.triggered; });
+      if (trig.length) {
+        trig.forEach(function (f) {
+          var b = el(doc, 'div', {
+            margin: '10px 0 0', padding: '10px 12px', borderRadius: '8px',
+            background: 'rgba(255,59,59,0.12)', border: '1px solid ' + C.red, color: '#ffd7d7'
+          });
+          b.appendChild(el(doc, 'span', { color: C.red, fontWeight: '700' }, 'HARD FAIL — '));
+          b.appendChild(doc.createTextNode(str(f.detail) || str(f.rule)));
+          wrap.appendChild(b);
+        });
+      } else {
+        wrap.appendChild(el(doc, 'div', {
+          margin: '10px 0 0', padding: '8px 12px', borderRadius: '8px',
+          background: 'rgba(127,255,208,0.08)', border: '1px solid rgba(127,255,208,0.4)',
+          color: C.green
+        }, 'No hard-fail errors detected.'));
+      }
+
+      /* criteria grouped by dimension */
+      wrap.appendChild(sectionTitle(doc, "Clinical judgment — Tanner's model"));
+      ['notice', 'interpret', 'respond'].forEach(function (dim) {
+        var rows = arr(result.criteria).filter(function (c) { return c && c.dimension === dim; });
+        if (!rows.length) return;
+        wrap.appendChild(el(doc, 'div', {
+          color: C.amber, font: '600 12px ' + FONT, textTransform: 'capitalize', margin: '10px 0 4px'
+        }, dim));
+        var tbl = el(doc, 'div', {});
+        rows.forEach(function (c) {
+          var row = el(doc, 'div', {
+            display: 'flex', gap: '10px', padding: '6px 0',
+            borderBottom: '1px dotted rgba(127,168,184,0.25)', alignItems: 'flex-start'
+          });
+          var scoreTxt, scoreColor;
+          if (!c.assessed) { scoreTxt = 'n/a'; scoreColor = C.dim; }
+          else {
+            scoreTxt = c.earned + '/' + c.points;
+            scoreColor = c.earned >= c.points ? C.green : (c.earned > 0 ? C.amber : C.red);
+          }
+          row.appendChild(el(doc, 'div', {
+            minWidth: '52px', textAlign: 'right', fontWeight: '700', color: scoreColor
+          }, scoreTxt));
+          var body = el(doc, 'div', { flex: '1' });
+          body.appendChild(el(doc, 'div', {}, str(c.descriptor) || str(c.id)));
+          if (str(c.evidence)) body.appendChild(el(doc, 'div', { color: C.dim, fontSize: '11px' }, c.evidence));
+          row.appendChild(body);
+          tbl.appendChild(row);
+        });
+        wrap.appendChild(tbl);
+      });
+
+      /* timeline strip */
+      wrap.appendChild(sectionTitle(doc, 'Timeline'));
+      var tl = el(doc, 'div', {});
+      arr(result.timeline).forEach(function (ev) {
+        if (!ev) return;
+        var row = el(doc, 'div', { display: 'flex', gap: '10px', padding: '3px 0' });
+        row.appendChild(el(doc, 'div', {
+          minWidth: '46px', textAlign: 'right', color: C.cyan,
+          fontFamily: 'ui-monospace,monospace', fontSize: '12px'
+        }, fmtTime(ev.t)));
+        var lbl;
+        if (ev.kind === 'phase') {
+          lbl = el(doc, 'div', { color: C.dim, fontStyle: 'italic' }, str(ev.label));
+        } else {
+          var col = ev.good === true ? C.green : (ev.good === false ? C.red : C.amber);
+          lbl = el(doc, 'div', { color: col }, '▸ ' + str(ev.label));
+        }
+        row.appendChild(lbl);
+        tl.appendChild(row);
+      });
+      wrap.appendChild(tl);
+
+      /* small print */
+      wrap.appendChild(el(doc, 'div', {
+        marginTop: '16px', color: C.dim, fontSize: '10px', letterSpacing: '0.5px'
+      }, 'Draft scoring — pending educator review'));
+
+      containerEl.appendChild(wrap);
+    } catch (e) {
+      try {
+        var d = containerEl && containerEl.ownerDocument;
+        if (d) containerEl.appendChild(el(d, 'div', { color: '#ff3b3b' }, 'Debrief render error: ' + e.message));
+      } catch (e2) { /* give up quietly */ }
+    }
+  }
+
+  /* ============================================== OPTIONAL AI REASONING PASS
+   * Same request pattern as the 2D trainer's ReasoningGrader module:
+   * browser-direct Anthropic Messages API, key in sessionStorage ONLY
+   * ('nurse-sim-anthropic-key'), model claude-opus-5, structured outputs via
+   * output_config json_schema (0-2 scores as integer enums — numeric min/max
+   * is not supported), 90 s abort, refusal/max_tokens/errors -> rejected
+   * Promise with a user-displayable message. Caller decides whether to render.
+   * ======================================================================== */
+  var KEY_STORE = 'nurse-sim-anthropic-key';
+  var API_URL = 'https://api.anthropic.com/v1/messages';
+  var MODEL = 'claude-opus-5';
+  // Thinking is on by default on this model; max_tokens must cover thinking
+  // AND the JSON output, hence the headroom.
+  var MAX_TOKENS = 8000;
+
+  var GRADES_SCHEMA = {
+    type: 'object',
+    properties: {
+      perCommand: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            command: { type: 'string' },
+            noticing: { type: 'integer', enum: [0, 1, 2] },
+            interpreting: { type: 'integer', enum: [0, 1, 2] },
+            responding: { type: 'integer', enum: [0, 1, 2] },
+            comment: { type: 'string' }
+          },
+          required: ['command', 'noticing', 'interpreting', 'responding', 'comment'],
+          additionalProperties: false
+        }
+      },
+      overall: {
+        type: 'object',
+        properties: {
+          strength: { type: 'string' },
+          growth_area: { type: 'string' }
+        },
+        required: ['strength', 'growth_area'],
+        additionalProperties: false
+      }
+    },
+    required: ['perCommand', 'overall'],
+    additionalProperties: false
+  };
+
+  var GRADER_SYSTEM =
+    "You are a clinical-education grader using Tanner's Clinical Judgment Model. " +
+    'Grade each nurse command (with its stated rationale) from a VR anaphylaxis ' +
+    'simulation, strictly against this rubric and the scenario ground truth provided:\n' +
+    '- noticing (0-2): 2 = cited specific observable data actually present at that time; ' +
+    '1 = vague but directionally right; 0 = missed or invented findings.\n' +
+    '- interpreting (0-2): 2 = linked observations to the correct physiology/diagnosis; ' +
+    '1 = restated observations without meaning; 0 = absent or clinically wrong.\n' +
+    '- responding (0-2): 2 = correct, prioritized action for that moment; ' +
+    '1 = defensible but not the priority; 0 = absent or unsafe.\n' +
+    "For each command write ONE short comment sentence quoting the nurse's own words " +
+    'as evidence. Never credit observations the nurse did not report. Echo each ' +
+    "command's text exactly in the 'command' field. For the overall summary name one " +
+    'specific strength and one specific growth area grounded in what they actually did. ' +
+    'Output only the JSON.';
+
+  function getKey() {
+    try { return (root.sessionStorage && root.sessionStorage.getItem(KEY_STORE)) || ''; }
+    catch (e) { return ''; }
+  }
+
+  function gradeReasoning(summary, scenario) {
+    return new Promise(function (resolve, reject) {
+      var commands = nurseText(summary || {});
+      if (!commands.length) { reject(new Error('no nurse commands to grade')); return; }
+      var key = getKey();
+      if (!key) { reject(new Error('no API key configured (set it on the scenario screen)')); return; }
+      if (typeof fetch !== 'function') { reject(new Error('network unavailable in this environment')); return; }
+      scenario = scenario || {};
+
+      var prog = scenario.progressionRules || {};
+      var groundTruth = {
+        scenario: str(scenario.title),
+        hiddenCondition: str(scenario.hiddenCondition || (summary && summary.hiddenCondition)),
+        outcome: str(summary && summary.outcome),
+        timeElapsedSeconds: summary && summary.timeElapsedSeconds,
+        epinephrineGivenAtSeconds: summary && summary.epinephrineGivenAtSeconds,
+        timeToEpinephrineTargetSeconds: (scenario.scoringRubric || {}).timeToEpinephrineTargetSeconds,
+        untreatedCourse: arr(prog.untreated).map(function (s) {
+          return { atSeconds: s && s.atSeconds, vitals: s && s.vitals, cues: arr(s && s.cues) };
+        }),
+        actionsTaken: arr(summary && summary.interventionsTaken)
+      };
+      var payload = {
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        system: GRADER_SYSTEM,
+        output_config: { format: { type: 'json_schema', schema: GRADES_SCHEMA } },
+        messages: [{
+          role: 'user',
+          content: 'SCENARIO GROUND TRUTH:\n' + JSON.stringify(groundTruth, null, 1) +
+                   '\n\nNURSE COMMANDS TO GRADE (in order):\n' + JSON.stringify(commands, null, 1)
+        }]
+      };
+
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 90000);
+
+      fetch(API_URL, {
+        method: 'POST',
+        signal: ctrl ? ctrl.signal : undefined,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          // Documented CORS opt-in for calling the API from a browser page.
+          'anthropic-dangerous-direct-browser-access': 'true'
+        },
+        body: JSON.stringify(payload)
+      }).then(function (resp) {
+        clearTimeout(timer);
+        if (!resp.ok) {
+          if (resp.status === 401) throw new Error('API key was rejected — check it on the scenario screen');
+          if (resp.status === 429) throw new Error('rate limited — try again in a minute');
+          throw new Error('API error ' + resp.status);
+        }
+        return resp.json();
+      }).then(function (data) {
+        // Refusals arrive as HTTP 200 — check stop_reason before reading content.
+        if (data.stop_reason === 'refusal') throw new Error('the model declined this request');
+        if (data.stop_reason === 'max_tokens') throw new Error('response was truncated');
+        var textBlock = arr(data.content).filter(function (b) { return b && b.type === 'text'; })[0];
+        if (!textBlock) throw new Error('no text in response');
+        var grades = JSON.parse(textBlock.text); // schema-constrained upstream
+        if (!grades || !Array.isArray(grades.perCommand) || !grades.overall) {
+          throw new Error('unexpected response shape');
+        }
+        resolve(grades);
+      }).catch(function (e) {
+        clearTimeout(timer);
+        if (e && e.name === 'AbortError') reject(new Error('grading timed out after 90 s'));
+        else if (e instanceof TypeError) reject(new Error("network unavailable (offline, or blocked by this page's security policy)"));
+        else reject(e instanceof Error ? e : new Error(String(e)));
+      });
+    });
+  }
+
+  function renderReasoning(containerEl, grades) {
+    try {
+      if (!containerEl || !containerEl.appendChild || !containerEl.ownerDocument) return;
+      var doc = containerEl.ownerDocument;
+      grades = grades || {};
+      var wrap = el(doc, 'div', {
+        background: C.glass, border: '1px solid ' + C.line, borderRadius: '12px',
+        padding: '16px 20px', color: C.ink, fontFamily: FONT, fontSize: '13px',
+        lineHeight: '1.5', maxWidth: '760px', marginTop: '12px'
+      });
+      wrap.appendChild(sectionTitle(doc, 'AI-graded clinical reasoning'));
+
+      function chip(doc2, label, v) {
+        var col = v >= 2 ? C.green : (v === 1 ? C.amber : C.red);
+        return el(doc2, 'span', {
+          display: 'inline-block', margin: '0 6px 0 0', padding: '1px 8px',
+          borderRadius: '10px', border: '1px solid ' + col, color: col, fontSize: '11px'
+        }, label + ' ' + (isNum(v) ? v : '?') + '/2');
+      }
+
+      arr(grades.perCommand).forEach(function (g) {
+        if (!g) return;
+        var row = el(doc, 'div', {
+          padding: '8px 0', borderBottom: '1px dotted rgba(127,168,184,0.25)'
+        });
+        row.appendChild(el(doc, 'div', { color: C.ink, fontStyle: 'italic' }, '“' + str(g.command) + '”'));
+        var chips = el(doc, 'div', { margin: '4px 0' });
+        chips.appendChild(chip(doc, 'Notice', g.noticing));
+        chips.appendChild(chip(doc, 'Interpret', g.interpreting));
+        chips.appendChild(chip(doc, 'Respond', g.responding));
+        row.appendChild(chips);
+        if (str(g.comment)) row.appendChild(el(doc, 'div', { color: C.dim, fontSize: '11px' }, g.comment));
+        wrap.appendChild(row);
+      });
+
+      var ov = grades.overall || {};
+      var box = el(doc, 'div', { marginTop: '10px' });
+      if (str(ov.strength)) {
+        var s = el(doc, 'div', {});
+        s.appendChild(el(doc, 'span', { color: C.green, fontWeight: '700' }, 'Strength: '));
+        s.appendChild(doc.createTextNode(str(ov.strength)));
+        box.appendChild(s);
+      }
+      if (str(ov.growth_area)) {
+        var g2 = el(doc, 'div', {});
+        g2.appendChild(el(doc, 'span', { color: C.amber, fontWeight: '700' }, 'Growth area: '));
+        g2.appendChild(doc.createTextNode(str(ov.growth_area)));
+        box.appendChild(g2);
+      }
+      wrap.appendChild(box);
+      wrap.appendChild(el(doc, 'div', {
+        marginTop: '12px', color: C.dim, fontSize: '10px'
+      }, 'Draft scoring — pending educator review'));
+      containerEl.appendChild(wrap);
+    } catch (e) { /* rendering must never throw */ }
+  }
+
+  /* ============================================================== EXPORT
+   * Shaped for drag-drop ingest by instructor-dashboard.html's Parser
+   * (tolerant; missing fields mark the session "incomplete", never throw).
+   * Field mapping to that parser:
+   *   pseudonym            <- extra.pseudonym (default 'vr-anon' so the row
+   *                           isn't flagged incomplete)
+   *   scenario             <- {key, title} object (parser reads .title/.key)
+   *   classCode            <- extra.classCode || null (cohort grouping label)
+   *   exported_at          <- ISO timestamp (parser: raw.exported_at||exportedAt)
+   *   outcome              <- parser only knows ['escalated_early',
+   *                           'escalated_late','crash']; we map
+   *                           arrest->'crash', stabilized with epi<=240s ->
+   *                           'escalated_early', stabilized later ->
+   *                           'escalated_late'; 'ended' stays raw and the
+   *                           dashboard marks the row incomplete (graceful).
+   *                           Raw VR outcome preserved as vrOutcome.
+   *   endTime              <- timeElapsedSeconds
+   *   log[]                <- {t,track,key,label} entries: 'cue' (untreated
+   *                           stages incl. key 'rr' at t=0 for the RR cue the
+   *                           dashboard uses for cue latency), 'attention'
+   *                           key 'monitor' (vitals check), 'action' entries
+   *                           (iv-fluid-bolus -> key 'fluids', call-for-help
+   *                           -> key 'escalate' to match dashboard metrics),
+   *                           'reasoning' entries for nurse commands bound to
+   *                           a matched action time.
+   *   scores.ttr           <- first correct action time (dashboard KPI)
+   *   scores.cueLatency    <- monitor-check time minus first cue (or null =
+   *                           "never looked"; presence of the key means known)
+   * Everything else (rubric result, transcript, finalVitals, …) is a
+   * superset the dashboard ignores.
+   * ==================================================================== */
+  function exportSession(summary, result, scenario, extra) {
+    summary = summary || {}; result = result || {}; scenario = scenario || {}; extra = extra || {};
+    var res = resolveInterventions(summary, scenario);
+    var meta = result.meta || {};
+    var elapsed = isNum(summary.timeElapsedSeconds) ? summary.timeElapsedSeconds : 0;
+    var epiAt = isNum(meta.epinephrineGivenAtSeconds) ? meta.epinephrineGivenAtSeconds
+              : (isNum(summary.epinephrineGivenAtSeconds) ? summary.epinephrineGivenAtSeconds : null);
+
+    // outcome mapping (see comment block above)
+    var outcome = str(summary.outcome);
+    var mapped = outcome;
+    if (outcome === 'arrest') mapped = 'crash';
+    else if (outcome === 'stabilized') mapped = (epiAt !== null && epiAt <= 240) ? 'escalated_early' : 'escalated_late';
+
+    // -------- log --------
+    var log = [];
+    var prog = scenario.progressionRules || {};
+    var cueKeys = ['rr', 'skin', 'stridor', 'shock', 'preArrest', 'obtunded', 'crash'];
+    arr(prog.untreated).forEach(function (st, i) {
+      if (!st || !isNum(st.atSeconds)) return;
+      if (st.atSeconds > elapsed && st.atSeconds !== 0) return;
+      log.push({ t: st.atSeconds, track: 'cue', key: cueKeys[i] || ('stage' + i),
+                 label: str(arr(st.cues)[0] || 'Clinical stage') });
+    });
+    var KEY_MAP = { 'iv-fluid-bolus': 'fluids', 'call-for-help': 'escalate' };
+    res.entries.forEach(function (e) {
+      var t = isNum(e.atSeconds) ? e.atSeconds : 0;
+      if (e.id === 'full-vitals-monitor') {
+        log.push({ t: t, track: 'attention', key: 'monitor',
+                   label: 'Checked vitals monitor', vitals: summary.finalVitals || undefined });
+      } else {
+        log.push({ t: t, track: 'action', key: KEY_MAP[e.id] || e.id || 'unknown',
+                   label: e.name });
+      }
+    });
+    // Bind nurse commands to matched action times where possible (transcript
+    // entries carry no timestamps of their own); unmatched ones get t of the
+    // nearest action, else 0 — the full transcript is exported separately.
+    var nurseCmds = nurseText(summary);
+    nurseCmds.forEach(function (txt, i) {
+      var t = 0;
+      var match = res.entries.filter(function (e) {
+        return isNum(e.atSeconds) && norm(txt).indexOf(norm(e.name)) !== -1;
+      })[0];
+      if (match) t = match.atSeconds;
+      else if (res.entries[i] && isNum(res.entries[i].atSeconds)) t = res.entries[i].atSeconds;
+      log.push({ t: t, track: 'reasoning', key: 'cmd' + (i + 1),
+                 label: 'Nurse command + rationale', skipped: false,
+                 notice: txt, interpret: txt, respond: txt });
+    });
+    log.sort(function (a, b) { return a.t - b.t; });
+
+    var firstAction = log.filter(function (e) { return e.track === 'action'; })[0];
+    var monitorLook = log.filter(function (e) { return e.track === 'attention' && e.key === 'monitor'; })[0];
+
+    return {
+      app: 'nurse-vr-hub',
+      version: VERSION,
+      exported_at: new Date().toISOString(),
+      pseudonym: str(extra.pseudonym) || 'vr-anon',
+      classCode: str(extra.classCode) || null,
+      scenario: { key: str(scenario.id) || 'emerg', title: str(scenario.title) || 'VR scenario' },
+      scenarioId: str(scenario.id) || 'emerg',
+      outcome: mapped,
+      vrOutcome: outcome || 'unknown',
+      endTime: elapsed,
+      timings: {
+        timeElapsedSeconds: elapsed,
+        epinephrineGivenAtSeconds: epiAt,
+        timeToEpinephrineTargetSeconds: isNum(meta.timeToEpinephrineTargetSeconds)
+          ? meta.timeToEpinephrineTargetSeconds
+          : ((scenario.scoringRubric || {}).timeToEpinephrineTargetSeconds || null),
+        firstActionAtSeconds: firstAction ? firstAction.t : null
+      },
+      scores: {
+        ttr: firstAction ? firstAction.t : null,
+        // key present => dashboard treats latency as "known"; null = never looked
+        cueLatency: monitorLook ? monitorLook.t : null,
+        totalPoints: isNum(result.totalPoints) ? result.totalPoints : null,
+        maxAssessedPoints: isNum(result.maxAssessedPoints) ? result.maxAssessedPoints : null
+      },
+      rubric: {
+        criteria: arr(result.criteria),
+        hardFails: arr(result.hardFails),
+        timeline: arr(result.timeline)
+      },
+      log: log,
+      transcript: arr(summary.transcript),
+      finalVitals: summary.finalVitals || null,
+      hiddenCondition: str(summary.hiddenCondition || scenario.hiddenCondition) || null,
+      degraded: summary.degraded === true
+    };
+  }
+
+  /* ------------------------------------------------------------- exports */
+  root.AARDebrief = {
+    version: VERSION,
+    score: score,
+    renderInto: renderInto,
+    gradeReasoning: gradeReasoning,
+    renderReasoning: renderReasoning,
+    exportSession: exportSession,
+    _heuristics: HEURISTICS   // exposed so an educator can inspect/tune live
+  };
+
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+/* =====================================================================
+   VOICE BRIDGE — hands-free command input for the nurse VR hub
+   ---------------------------------------------------------------------
+   Ported from the VoiceCommand module in nurse-sim-3d.html (the ElevenLabs
+   Conversational AI raw-WebSocket client that sat between the engine
+   modules and Module 3). Same protocol, same audio pipeline; the sim
+   surface is different — instead of calling sim verbs directly, every
+   agent tool call is composed into ONE natural-language order string
+   (action + ' because ' + rationale) and handed to opts.onCommand(text),
+   ready to feed the hub's command box. Reasoning-before-action is the
+   app's thesis: the agent is configured to refuse interventions until
+   the trainee has said WHY, so `rationale` is always their own words.
+
+   WHY RAW WEBSOCKET, NOT THE SDK: the protocol is small and documented,
+   and a bundled SDK risks a literal end-of-script sequence terminating an
+   inline script. Nothing here needs a build step and nothing is fetched
+   at runtime except the socket.
+
+   WHY STREAMED AUDIO, NOT SpeechRecognition: the Quest browser does not
+   implement the Web Speech API's SpeechRecognition at all. Microphone
+   PCM is captured and streamed instead. Do NOT "simplify" this back to
+   SpeechRecognition — it would silently never fire in the headset.
+
+   NO SECRET LIVES HERE. The agent accepts unauthenticated sessions, so
+   the page needs only its public id.
+
+   API (window.VoiceBridge):
+     init({ onCommand(text) REQUIRED,
+            onStatus(state)     optional — 'idle'|'connecting'|'listening'|'agent-speaking'|'error',
+            onTranscript(who,t) optional — who is 'you'|'agent' })
+     start() -> Promise   (call from a click — getUserMedia gesture rule)
+     stop()  -> Promise   (tears down mic + WS cleanly)
+     toggle()
+     isActive() -> boolean
+   Also listens for CustomEvent 'sim-voice-toggle' on window -> toggle().
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  // The agent lives in the Bluedrop workspace ElevenLabs account. Its
+  // origin allowlist ("Allowed origins" in the agent's Security settings)
+  // must include every origin this page is served from — localhost,
+  // https://teteiwuala.github.io, and the LAN IP used for headset testing —
+  // or the WebSocket handshake is refused.
+  const AGENT_ID = 'agent_4701kz3zcrh0f5rrg9wkbradzt45';
+  const WS_URL = 'wss://api.elevenlabs.io/v1/convai/conversation?agent_id=' + AGENT_ID;
+  const TARGET_RATE = 16000;          // pcm_16000 both directions
+  const SEND_EVERY_SAMPLES = 1600;    // ~100 ms of 16 kHz mono
+
+  let ws = null, ac = null, micStream = null, micNode = null, srcNode = null;
+  let state = 'idle';                 // idle | connecting | listening | agent-speaking | error
+  let pending = [];                   // Float32 mic samples awaiting a send
+  let playCursor = 0, liveSources = [];
+  let reportedFailure = false;        // "report once, don't spam"
+  let stopping = false;
+  let startPromise = null;            // double-connect guard: concurrent start() shares one attempt
+  let inited = false;
+
+  // ---- callbacks (wired by init) ----------------------------------------
+  let cb = {
+    onCommand: function () {},
+    onStatus: function () {},
+    onTranscript: function () {},
+  };
+
+  function setState(s) {
+    if (state === s) return;
+    state = s;
+    try { cb.onStatus(s); } catch (e) {}
+  }
+
+  // Surface a failure exactly once per session; never throw.
+  function fail(msg) {
+    setState('error');
+    if (reportedFailure) return;
+    reportedFailure = true;
+    console.warn('[VoiceBridge] ' + msg + ' The on-screen controls still work.');
+  }
+
+  function emitTranscript(who, text) {
+    try { cb.onTranscript(who, text); } catch (e) {}
+  }
+
+  // ---- tool calls -> one natural-language order --------------------------
+  // The agent's tool definitions (JSON-Schema parameters, including the
+  // required `rationale` on interventions) live in the platform agent
+  // config — the empty conversation_initiation_client_data below means that
+  // config is used verbatim. Here every call is flattened into the order
+  // string the hub's command box expects.
+  function compose(action, rationale) {
+    const a = String(action || '').trim();
+    const r = String(rationale || '').trim();
+    if (!a) return '';
+    return r ? a + ' because ' + r : a;
+  }
+
+  function issueOrder(action, rationale, ack) {
+    const text = compose(action, rationale);
+    if (!text) return 'I did not catch an action to carry out.';
+    try { cb.onCommand(text); } catch (e) {
+      console.warn('[VoiceBridge] onCommand handler threw:', e);
+    }
+    return ack || 'Order sent to the simulation.';
+  }
+
+  // Named tools mirror the sim-3d agent's configured tool set, plus a
+  // generic issue_order/sim_command for a hub-side agent config. Adding a
+  // tool here is safe; the agent only calls what its platform config lists.
+  const TOOLS = {
+    // Generic: agent extracts {action, rationale} from the nurse's speech.
+    issue_order: async (p) => issueOrder(p && p.action, p && p.rationale),
+    sim_command: async (p) => issueOrder(p && p.action, p && p.rationale),
+
+    // Assessments (no rationale required — looking is always allowed).
+    check_vitals:    async () => issueOrder('check vitals', '', 'Checking vitals now.'),
+    talk_to_patient: async () => issueOrder('talk to the patient', '', 'Talking to the patient.'),
+    check_skin:      async () => issueOrder('check the skin and IV site', '', 'Checking the skin.'),
+    scan_area:       async (p) => issueOrder(
+      'look around' + (p && p.looking_for ? ' for ' + p.looking_for : ''), '',
+      'Scanning the area.'),
+
+    // Interventions: the agent will not call these until the trainee has
+    // said WHY, so `rationale` is always their own words.
+    give_fluids: async (p) => issueOrder('give IV fluids', p && p.rationale, 'Fluids ordered.'),
+    escalate:    async (p) => issueOrder('call for help', p && p.rationale, 'Calling for help now.'),
+
+    // Thinking aloud: forward the reasoning as an order-shaped note so the
+    // sim's log still captures it.
+    record_reasoning: async (p) => {
+      const notice = (p && p.notice) || '';
+      const interpret = (p && p.interpret) || '';
+      const parts = [notice, interpret].filter(Boolean).join(' — ');
+      if (parts) issueOrder('note: ' + parts, '', '');
+      return '';
+    },
+
+    spawn_item: async (p) => issueOrder(
+      'get ' + ((p && p.item) || 'equipment'), p && p.rationale, 'Asked for it.'),
+  };
+
+  // ---- audio: base64 <-> PCM (ported verbatim) ---------------------------
+  function b64ToInt16(b64) {
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
+  }
+  function int16ToB64(i16) {
+    const bytes = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  }
+
+  // Linear resample to 16 kHz. If the AudioContext honoured our 16 kHz
+  // request this is a straight pass-through.
+  function toTargetRate(f32, fromRate) {
+    if (fromRate === TARGET_RATE) return f32;
+    const ratio = fromRate / TARGET_RATE;
+    const out = new Float32Array(Math.floor(f32.length / ratio));
+    for (let i = 0; i < out.length; i++) {
+      const src = i * ratio, i0 = Math.floor(src), i1 = Math.min(i0 + 1, f32.length - 1);
+      out[i] = f32[i0] + (f32[i1] - f32[i0]) * (src - i0);
+    }
+    return out;
+  }
+
+  // Gap-free sequential playback of agent audio (patient/instructor voice),
+  // with a small lead-in so chunk boundaries don't click.
+  function playChunk(b64) {
+    if (!ac) return;
+    const i16 = b64ToInt16(b64);
+    const f32 = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    const buf = ac.createBuffer(1, f32.length, TARGET_RATE);
+    buf.copyToChannel(f32, 0);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    src.connect(ac.destination);
+    const now = ac.currentTime;
+    if (playCursor < now) playCursor = now + 0.06;
+    src.start(playCursor);
+    playCursor += buf.duration;
+    liveSources.push(src);
+    src.onended = () => {
+      liveSources = liveSources.filter(s => s !== src);
+      if (!liveSources.length && state === 'agent-speaking') setState('listening');
+    };
+    setState('agent-speaking');
+  }
+  function flushPlayback() {                    // barge-in / interruption
+    liveSources.forEach(s => { try { s.stop(); } catch (e) {} });
+    liveSources = [];
+    playCursor = 0;
+    if (state === 'agent-speaking') setState('listening');
+  }
+
+  // ---- mic capture (ported verbatim) -------------------------------------
+  // AudioWorklet is preferred: it runs off the main thread, which matters
+  // because the main thread is also driving a 72 fps XR render loop.
+  // ScriptProcessorNode is the fallback for browsers that refuse the
+  // Blob-URL worklet module.
+  const WORKLET_SRC =
+    'class MicCapture extends AudioWorkletProcessor{' +
+    'process(inputs){const ch=inputs[0]&&inputs[0][0];' +
+    'if(ch&&ch.length)this.port.postMessage(new Float32Array(ch));return true;}}' +
+    "registerProcessor('mic-capture',MicCapture);";
+
+  function pushSamples(f32, rate) {
+    if (!ws || ws.readyState !== 1) return;
+    const res = toTargetRate(f32, rate);
+    pending.push(res);
+    let total = pending.reduce((n, a) => n + a.length, 0);
+    while (total >= SEND_EVERY_SAMPLES) {
+      const merged = new Float32Array(total);
+      let o = 0;
+      pending.forEach(a => { merged.set(a, o); o += a.length; });
+      const take = merged.subarray(0, SEND_EVERY_SAMPLES);
+      const i16 = new Int16Array(take.length);
+      for (let i = 0; i < take.length; i++) {
+        const v = Math.max(-1, Math.min(1, take[i]));
+        i16[i] = v < 0 ? v * 32768 : v * 32767;
+      }
+      try { ws.send(JSON.stringify({ user_audio_chunk: int16ToB64(i16) })); } catch (e) {}
+      const rest = merged.subarray(SEND_EVERY_SAMPLES);
+      pending = rest.length ? [new Float32Array(rest)] : [];
+      total = rest.length;
+    }
+  }
+
+  async function startMic() {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    try { ac = new AudioContext({ sampleRate: TARGET_RATE }); }
+    catch (e) { ac = new AudioContext(); }
+    if (ac.state === 'suspended') await ac.resume();
+    srcNode = ac.createMediaStreamSource(micStream);
+    const rate = ac.sampleRate;
+    let usedWorklet = false;
+    if (ac.audioWorklet) {
+      try {
+        const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+        await ac.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        micNode = new AudioWorkletNode(ac, 'mic-capture');
+        micNode.port.onmessage = (e) => pushSamples(e.data, rate);
+        srcNode.connect(micNode);
+        usedWorklet = true;
+      } catch (e) { usedWorklet = false; }
+    }
+    if (!usedWorklet) {
+      micNode = ac.createScriptProcessor(4096, 1, 1);
+      micNode.onaudioprocess = (e) => pushSamples(new Float32Array(e.inputBuffer.getChannelData(0)), rate);
+      srcNode.connect(micNode);
+      micNode.connect(ac.destination);   // ScriptProcessor needs a sink to pull
+    }
+  }
+
+  // ---- socket message handling (protocol ported verbatim) ----------------
+  function handle(msg) {
+    switch (msg.type) {
+      case 'ping':
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'pong', event_id: msg.ping_event && msg.ping_event.event_id }));
+        }
+        break;
+      case 'audio':
+        if (msg.audio_event && msg.audio_event.audio_base_64) playChunk(msg.audio_event.audio_base_64);
+        break;
+      case 'interruption':
+        flushPlayback();
+        break;
+      case 'agent_response':
+        if (msg.agent_response_event && msg.agent_response_event.agent_response) {
+          emitTranscript('agent', msg.agent_response_event.agent_response);
+        }
+        break;
+      case 'user_transcript':
+        if (msg.user_transcription_event && msg.user_transcription_event.user_transcript) {
+          emitTranscript('you', msg.user_transcription_event.user_transcript);
+        }
+        break;
+      case 'client_tool_call': {
+        const call = msg.client_tool_call || {};
+        const fn = TOOLS[call.tool_name];
+        const wants = call.expects_response !== false;
+        Promise.resolve()
+          .then(() => (fn ? fn(call.parameters || {}) : Promise.reject(new Error('unknown tool'))))
+          .then(result => {
+            if (!wants || !ws || ws.readyState !== 1) return;
+            ws.send(JSON.stringify({
+              type: 'client_tool_result', tool_call_id: call.tool_call_id,
+              result: String(result == null ? '' : result), is_error: false,
+            }));
+          })
+          .catch(err => {
+            if (!wants || !ws || ws.readyState !== 1) return;
+            ws.send(JSON.stringify({
+              type: 'client_tool_result', tool_call_id: call.tool_call_id,
+              result: 'That could not be done: ' + (err && err.message ? err.message : 'unknown'),
+              is_error: true, error_type: 'external_client',
+            }));
+          });
+        break;
+      }
+    }
+  }
+
+  // ---- lifecycle ----------------------------------------------------------
+  async function doStart() {
+    // navigator.onLine is NOT a hard gate: on Linux it often reports offline
+    // while requests succeed (VM NICs, NetworkManager quirks). Attempt the
+    // connection regardless — the socket's own error path reports honestly.
+    if (!window.WebSocket || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      fail('This browser will not give the page a microphone or a WebSocket.');
+      return;
+    }
+    stopping = false;
+    reportedFailure = false;
+    setState('connecting');
+    try {
+      await startMic();                       // ask for the mic first: a refusal here is cheap
+    } catch (e) {
+      fail('Microphone permission was declined.');
+      await teardown();
+      return;
+    }
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      fail('Could not reach the voice agent.');
+      await teardown();
+      return;
+    }
+    ws.onopen = () => {
+      // Send an (empty) initiation so the agent's own configuration is used
+      // verbatim — persona, tools and voice all live on the platform.
+      ws.send(JSON.stringify({ type: 'conversation_initiation_client_data' }));
+      setState('listening');
+    };
+    ws.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handle(msg);
+    };
+    ws.onerror = () => { if (!stopping) fail('The connection to the voice agent failed.'); };
+    ws.onclose = () => {
+      if (!stopping && state !== 'error') fail('The voice agent disconnected.');
+      teardown();
+    };
+  }
+
+  async function teardown() {
+    flushPlayback();
+    try { if (micNode) { micNode.disconnect(); micNode.onaudioprocess = null; } } catch (e) {}
+    try { if (srcNode) srcNode.disconnect(); } catch (e) {}
+    try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { if (ac) await ac.close(); } catch (e) {}
+    micNode = srcNode = micStream = ac = null;
+    pending = [];
+    if (state !== 'error') setState('idle');
+  }
+
+  // start(): safe to call from a click handler (the getUserMedia call happens
+  // inside the same task, preserving the user gesture). Never rejects.
+  // Repeated calls while active or mid-connect share the guard and no-op.
+  function start() {
+    if (startPromise) return startPromise;                   // already connecting
+    if (state !== 'idle' && state !== 'error') return Promise.resolve();  // already active
+    startPromise = doStart()
+      .catch(e => { console.warn('[VoiceBridge] start failed:', e); setState('error'); })
+      .finally(() => { startPromise = null; });
+    return startPromise;
+  }
+
+  async function stop() {
+    stopping = true;
+    try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) {}
+    ws = null;
+    await teardown();
+    setState('idle');                    // stop() always lands back at idle, even after an error
+    reportedFailure = false;
+  }
+
+  function isActive() {
+    return state === 'connecting' || state === 'listening' || state === 'agent-speaking';
+  }
+
+  function toggle() {
+    if (isActive()) { stop(); } else { start(); }
+  }
+
+  function init(opts) {
+    opts = opts || {};
+    if (typeof opts.onCommand !== 'function') {
+      console.warn('[VoiceBridge] init: opts.onCommand is required — voice orders will be dropped.');
+    }
+    cb.onCommand = typeof opts.onCommand === 'function' ? opts.onCommand : function () {};
+    cb.onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : function () {};
+    cb.onTranscript = typeof opts.onTranscript === 'function' ? opts.onTranscript : function () {};
+    inited = true;
+    try { cb.onStatus(state); } catch (e) {}   // let the UI paint the initial state
+  }
+
+  // The hub's mic button dispatches this; a click-dispatched event keeps the
+  // user-gesture context, so getUserMedia inside toggle()->start() is allowed.
+  window.addEventListener('sim-voice-toggle', () => {
+    if (!inited) console.warn('[VoiceBridge] sim-voice-toggle before init(); connecting without a command sink.');
+    toggle();
+  });
+
+  window.VoiceBridge = {
+    init, start, stop, toggle, isActive,
+    state: () => state,
+    agentId: AGENT_ID,
+  };
+})();
+
+</script>
+<script>
+/* =====================================================================
+   vr-ui.js — in-headset UI + locomotion module for the nurse VR sim
+   ---------------------------------------------------------------------
+   Makes the sim playable inside a WebXR headset, where DOM overlays are
+   invisible. Provides:
+     1) In-world holographic glass text panels (briefing / dialogue /
+        status) with raycastable buttons.
+     2) Controller thumbstick locomotion: left stick = smooth XZ move
+        relative to head yaw; right stick X = 30° snap turn.
+
+   Target: Three.js r160 UMD global THREE. Matches host conventions:
+   cyan 0x00e5ff hologram aesthetic, canvas -> THREE.CanvasTexture
+   (SRGB) on MeshBasicMaterial({transparent, side:DoubleSide, fog:false}),
+   additive soft-glow back-sprites, camera inside a rig Group.
+
+   BUTTON HIT-TEST APPROACH: each panel is ONE plane mesh; button pill
+   rectangles (canvas-pixel coords) are stored in mesh.userData.buttons.
+   Controller rays intersect the panel plane, the intersection UV is
+   converted to canvas pixels and tested against the stored rects. This
+   keeps one draw call / one texture per panel and makes hover repaints
+   trivial (redraw canvas only when the hovered button changes).
+
+   Usage:
+     var vrui = window.makeVRUI(THREE, scene, { renderer, camera, rig,
+                  bounds: {minX:-4, maxX:4, minZ:-4, maxZ:4} });
+     vrui.showPanel('brief', {title, body, buttons:[{label, onSelect}]});
+     vrui.setHUDLine('HR 128 · BP 84/52');
+     vrui.update(dt);   // each frame
+     vrui.dispose();
+   Safe no-op on desktop (panels still render for testing; locomotion
+   only engages while renderer.xr.isPresenting).
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  window.makeVRUI = function (THREE, scene, opts) {
+    opts = opts || {};
+    var renderer = opts.renderer || null;
+    var camera   = opts.camera   || null;
+    var rig      = opts.rig      || null;
+    var bounds   = opts.bounds   || { minX: -4, maxX: 4, minZ: -4, maxZ: 4 };
+
+    /* ---------------- tunables ---------------- */
+    var CYAN        = '#00e5ff';
+    var PANEL_W_M   = 1.0;                 // panel width in metres
+    var PANEL_DIST  = 1.2;                 // metres in front of the head
+    var CANVAS_W    = 1024, CANVAS_H = 704;
+    var PANEL_H_M   = PANEL_W_M * (CANVAS_H / CANVAS_W);
+    var HUD_W_M     = 0.66, HUD_H_M = 0.062;
+    var HUD_DIST    = 1.1;                 // metres from head
+    var HUD_PITCH   = 15 * Math.PI / 180;  // below forward gaze
+    var HUD_LERP_K  = 3.0;                 // lazy-follow stiffness
+    var MOVE_SPEED  = 1.6;                 // m/s
+    var DEADZONE    = 0.15;
+    var SNAP_ANGLE  = 30 * Math.PI / 180;  // per flick
+    var SNAP_ON     = 0.6;                 // stick X to trigger snap
+    var SNAP_OFF    = 0.3;                 // must return below this
+    var MAX_BODY    = 1000;                // chars, clamp + ellipsis
+
+    /* ---------------- shared state ---------------- */
+    var root = new THREE.Group();
+    root.name = 'vrui-root';
+    scene.add(root);
+
+    var panels = {};            // id -> record
+    var disposables = [];       // geometries / materials / textures
+    var raycaster = new THREE.Raycaster();
+    var tmpMat  = new THREE.Matrix4();
+    var tmpV1   = new THREE.Vector3();
+    var tmpV2   = new THREE.Vector3();
+    var tmpV3   = new THREE.Vector3();
+    var tmpQ    = new THREE.Quaternion();
+    var tmpE    = new THREE.Euler(0, 0, 0, 'YXZ');
+    var UP      = new THREE.Vector3(0, 1, 0);
+    var snapReady = true;
+    var disposed  = false;
+
+    function track(r) { disposables.push(r); return r; }
+
+    /* =====================================================
+       Glow back-sprite (additive, matches host aesthetic)
+       ===================================================== */
+    function makeGlowTexture() {
+      var c = document.createElement('canvas');
+      c.width = c.height = 256;
+      var g = c.getContext('2d');
+      var grad = g.createRadialGradient(128, 128, 8, 128, 128, 128);
+      grad.addColorStop(0.0, 'rgba(0,229,255,0.55)');
+      grad.addColorStop(0.4, 'rgba(0,229,255,0.16)');
+      grad.addColorStop(1.0, 'rgba(0,229,255,0.0)');
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 256, 256);
+      var tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return track(tex);
+    }
+    var glowTex = makeGlowTexture();
+
+    function makeGlowSprite(wScale, hScale) {
+      var mat = track(new THREE.SpriteMaterial({
+        map: glowTex, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+      }));
+      var spr = new THREE.Sprite(mat);
+      spr.scale.set(wScale, hScale, 1);
+      spr.position.z = -0.015;
+      spr.raycast = function () {};   // never blocks button rays
+      return spr;
+    }
+
+    /* =====================================================
+       Canvas drawing helpers
+       ===================================================== */
+    function roundRect(g, x, y, w, h, r) {
+      g.beginPath();
+      g.moveTo(x + r, y);
+      g.arcTo(x + w, y, x + w, y + h, r);
+      g.arcTo(x + w, y + h, x, y + h, r);
+      g.arcTo(x, y + h, x, y, r);
+      g.arcTo(x, y, x + w, y, r);
+      g.closePath();
+    }
+
+    function wrapText(g, text, maxWidth, maxLines) {
+      var words = String(text).split(/\s+/);
+      var lines = [], line = '';
+      for (var i = 0; i < words.length; i++) {
+        var test = line ? line + ' ' + words[i] : words[i];
+        if (g.measureText(test).width > maxWidth && line) {
+          lines.push(line);
+          line = words[i];
+          if (lines.length >= maxLines) break;
+        } else {
+          line = test;
+        }
+      }
+      if (lines.length < maxLines && line) lines.push(line);
+      if (lines.length >= maxLines && (line || i < words.length)) {
+        var last = lines[maxLines - 1] || '';
+        while (last && g.measureText(last + '…').width > maxWidth) {
+          last = last.slice(0, -1);
+        }
+        lines[maxLines - 1] = last + '…';
+        lines.length = maxLines;
+      }
+      return lines;
+    }
+
+    /* Draw the full panel (glass, title, body, button pills) and
+       record button rects in canvas pixels. hoveredIdx = index of the
+       button under a controller ray, or -1. */
+    function drawPanel(rec, hoveredIdx) {
+      var g = rec.ctx, W = CANVAS_W, H = CANVAS_H;
+      var def = rec.def;
+      g.clearRect(0, 0, W, H);
+
+      // glass body
+      roundRect(g, 6, 6, W - 12, H - 12, 34);
+      var bg = g.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, 'rgba(8,26,40,0.88)');
+      bg.addColorStop(1, 'rgba(4,14,24,0.82)');
+      g.fillStyle = bg;
+      g.fill();
+      g.lineWidth = 3;
+      g.strokeStyle = 'rgba(0,229,255,0.85)';
+      g.stroke();
+      // inner top sheen
+      roundRect(g, 14, 14, W - 28, 70, 24);
+      g.fillStyle = 'rgba(0,229,255,0.06)';
+      g.fill();
+
+      var pad = 52;
+
+      // title
+      if (def.title) {
+        g.font = '600 46px "Segoe UI", system-ui, sans-serif';
+        g.fillStyle = CYAN;
+        g.textBaseline = 'top';
+        g.textAlign = 'left';
+        g.shadowColor = 'rgba(0,229,255,0.7)';
+        g.shadowBlur = 14;
+        g.fillText(String(def.title), pad, 44, W - pad * 2);
+        g.shadowBlur = 0;
+        // divider
+        g.fillStyle = 'rgba(0,229,255,0.35)';
+        g.fillRect(pad, 112, W - pad * 2, 2);
+      }
+
+      // buttons row geometry first (body must not overlap it)
+      var btns = def.buttons || [];
+      var btnH = 86, btnBottom = 44;
+      var btnY = H - btnBottom - btnH;
+      var bodyTop = def.title ? 138 : 48;
+      var bodyBottom = btns.length ? btnY - 26 : H - 48;
+
+      // body
+      rec.mesh.userData.buttons = [];
+      if (def.body) {
+        var body = String(def.body);
+        if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY - 1) + '…';
+        g.font = '30px "Segoe UI", system-ui, sans-serif';
+        g.fillStyle = 'rgba(225,245,255,0.95)';
+        g.textBaseline = 'top';
+        g.textAlign = 'left';
+        var lineH = 42;
+        var maxLines = Math.max(1, Math.floor((bodyBottom - bodyTop) / lineH));
+        var paras = body.split(/\n+/), lines = [];
+        for (var p = 0; p < paras.length && lines.length < maxLines; p++) {
+          lines = lines.concat(
+            wrapText(g, paras[p], W - pad * 2, maxLines - lines.length));
+        }
+        for (var li = 0; li < lines.length; li++) {
+          g.fillText(lines[li], pad, bodyTop + li * lineH);
+        }
+      }
+
+      // buttons — rounded cyan pills, centred along the bottom
+      if (btns.length) {
+        g.font = '600 34px "Segoe UI", system-ui, sans-serif';
+        var gap = 28, widths = [], total = 0;
+        for (var b = 0; b < btns.length; b++) {
+          var w = Math.ceil(g.measureText(String(btns[b].label || '')).width) + 76;
+          widths.push(w);
+          total += w;
+        }
+        total += gap * (btns.length - 1);
+        var x = (W - total) / 2;
+        for (b = 0; b < btns.length; b++) {
+          var bw = widths[b], hovered = (b === hoveredIdx);
+          roundRect(g, x, btnY, bw, btnH, btnH / 2);
+          g.fillStyle = hovered ? 'rgba(0,229,255,0.55)' : 'rgba(0,229,255,0.14)';
+          g.fill();
+          g.lineWidth = hovered ? 4 : 2.5;
+          g.strokeStyle = hovered ? '#aef6ff' : 'rgba(0,229,255,0.9)';
+          g.shadowColor = 'rgba(0,229,255,0.8)';
+          g.shadowBlur = hovered ? 22 : 8;
+          g.stroke();
+          g.shadowBlur = 0;
+          g.fillStyle = hovered ? '#03222e' : CYAN;
+          g.textAlign = 'center';
+          g.textBaseline = 'middle';
+          g.fillText(String(btns[b].label || ''), x + bw / 2, btnY + btnH / 2 + 2);
+          g.textAlign = 'left';
+          g.textBaseline = 'top';
+          rec.mesh.userData.buttons.push({
+            rect: { x: x, y: btnY, w: bw, h: btnH },
+            label: btns[b].label,
+            onSelect: btns[b].onSelect || null,
+            index: b
+          });
+          x += bw + gap;
+        }
+      }
+      rec.tex.needsUpdate = true;
+      rec.hoveredIdx = hoveredIdx;
+    }
+
+    /* =====================================================
+       Panel lifecycle
+       ===================================================== */
+    function headPose(outPos, outQuat) {
+      if (camera) {
+        camera.getWorldPosition(outPos);
+        camera.getWorldQuaternion(outQuat);
+      } else {
+        outPos.set(0, 1.6, 0);
+        outQuat.identity();
+      }
+    }
+
+    function placePanel(group) {
+      headPose(tmpV1, tmpQ);                          // head pos + quat
+      tmpE.setFromQuaternion(tmpQ, 'YXZ');
+      var yaw = tmpE.y;                               // horizontal gaze
+      tmpV2.set(0, 0, -1).applyAxisAngle(UP, yaw);    // level forward
+      group.position.copy(tmpV1).addScaledVector(tmpV2, PANEL_DIST);
+      group.position.y = tmpV1.y;                     // head height
+      group.rotation.set(0, yaw, 0);                  // vertical, facing user
+    }
+
+    function showPanel(id, def) {
+      if (disposed) return;
+      def = def || {};
+      var rec = panels[id];
+      if (!rec) {
+        var canvas = document.createElement('canvas');
+        canvas.width = CANVAS_W; canvas.height = CANVAS_H;
+        var tex = track(new THREE.CanvasTexture(canvas));
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = (renderer && renderer.capabilities)
+          ? renderer.capabilities.getMaxAnisotropy() : 1;
+        var mat = track(new THREE.MeshBasicMaterial({
+          map: tex, transparent: true, side: THREE.DoubleSide,
+          fog: false, depthWrite: false
+        }));
+        var geo = track(new THREE.PlaneGeometry(PANEL_W_M, PANEL_H_M));
+        var mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 10;
+        mesh.userData.vruiPanelId = id;
+        var group = new THREE.Group();
+        group.add(makeGlowSprite(PANEL_W_M * 1.35, PANEL_H_M * 1.55));
+        group.add(mesh);
+        root.add(group);
+        rec = panels[id] = {
+          group: group, mesh: mesh, tex: tex,
+          ctx: canvas.getContext('2d'),
+          def: def, hoveredIdx: -1
+        };
+      } else {
+        rec.def = def;
+      }
+      drawPanel(rec, -1);
+      placePanel(rec.group);        // recompute placement on every show
+      rec.group.visible = true;
+      return rec;
+    }
+
+    function hidePanel(id) {
+      var rec = panels[id];
+      if (rec) rec.group.visible = false;
+    }
+
+    function hideAll() {
+      for (var id in panels) hidePanel(id);
+    }
+
+    /* =====================================================
+       HUD — one-line status strip, lazy-follows the gaze
+       ===================================================== */
+    var hud = (function () {
+      var canvas = document.createElement('canvas');
+      canvas.width = 1024; canvas.height = 96;
+      var tex = track(new THREE.CanvasTexture(canvas));
+      tex.colorSpace = THREE.SRGBColorSpace;
+      var mat = track(new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, side: THREE.DoubleSide,
+        fog: false, depthTest: false, depthWrite: false
+      }));
+      var geo = track(new THREE.PlaneGeometry(HUD_W_M, HUD_H_M));
+      var mesh = new THREE.Mesh(geo, mat);
+      mesh.renderOrder = 20;
+      mesh.visible = false;
+      mesh.raycast = function () {};   // HUD is not clickable
+      root.add(mesh);
+      return { mesh: mesh, tex: tex, ctx: canvas.getContext('2d'),
+               text: '', placed: false };
+    })();
+
+    function drawHUD() {
+      var g = hud.ctx, W = 1024, H = 96;
+      g.clearRect(0, 0, W, H);
+      if (!hud.text) return;
+      g.font = '600 44px "Segoe UI", system-ui, sans-serif';
+      var tw = Math.min(W - 60, g.measureText(hud.text).width);
+      var bw = tw + 56, bx = (W - bw) / 2;
+      roundRect(g, bx, 8, bw, H - 16, (H - 16) / 2);
+      g.fillStyle = 'rgba(4,16,26,0.72)';
+      g.fill();
+      g.lineWidth = 2;
+      g.strokeStyle = 'rgba(0,229,255,0.6)';
+      g.stroke();
+      g.fillStyle = CYAN;
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.shadowColor = 'rgba(0,229,255,0.7)';
+      g.shadowBlur = 10;
+      g.fillText(hud.text, W / 2, H / 2 + 2, W - 80);
+      g.shadowBlur = 0;
+      hud.tex.needsUpdate = true;
+    }
+
+    function setHUDLine(text) {
+      if (disposed) return;
+      hud.text = text == null ? '' : String(text);
+      drawHUD();
+      hud.mesh.visible = !!hud.text;
+      if (!hud.placed && hud.mesh.visible) {   // first show: jump to target
+        hudTarget(tmpV3);
+        hud.mesh.position.copy(tmpV3);
+        hud.placed = true;
+      }
+    }
+
+    function hudTarget(out) {
+      headPose(tmpV1, tmpQ);
+      // forward tilted HUD_PITCH below the gaze, in head space
+      out.set(0, -Math.sin(HUD_PITCH), -Math.cos(HUD_PITCH))
+         .applyQuaternion(tmpQ);
+      out.multiplyScalar(HUD_DIST).add(tmpV1);
+      return out;
+    }
+
+    /* =====================================================
+       Controllers + select interaction
+       ===================================================== */
+    var controllers = [];
+    function controllerRaycast(controller) {
+      tmpMat.identity().extractRotation(controller.matrixWorld);
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tmpMat);
+      var targets = [];
+      for (var id in panels) {
+        if (panels[id].group.visible) targets.push(panels[id].mesh);
+      }
+      if (!targets.length) return null;
+      var hits = raycaster.intersectObjects(targets, false);
+      if (!hits.length || !hits[0].uv) return null;
+      var hit = hits[0];
+      var rec = panels[hit.object.userData.vruiPanelId];
+      var px = hit.uv.x * CANVAS_W;
+      var py = (1 - hit.uv.y) * CANVAS_H;
+      var btns = hit.object.userData.buttons || [];
+      for (var i = 0; i < btns.length; i++) {
+        var r = btns[i].rect;
+        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+          return { rec: rec, button: btns[i] };
+        }
+      }
+      return { rec: rec, button: null };
+    }
+
+    function onSelectStart(ev) {
+      // Fires for controller trigger AND Quest hand-tracking pinch —
+      // both arrive as the XR 'selectstart' event on the controller.
+      var hit = controllerRaycast(ev.target);
+      if (hit && hit.button && typeof hit.button.onSelect === 'function') {
+        drawPanel(hit.rec, hit.button.index);   // press flash
+        hit.button.onSelect();
+      }
+    }
+
+    if (renderer && renderer.xr && renderer.xr.getController) {
+      for (var ci = 0; ci < 2; ci++) {
+        var c = renderer.xr.getController(ci);
+        if (!c) continue;
+        c.addEventListener('selectstart', onSelectStart);
+        if (!c.parent && rig) rig.add(c);   // keep rays rig-relative
+        controllers.push(c);
+      }
+    }
+
+    /* =====================================================
+       Locomotion (XR only)
+       ===================================================== */
+    function stickAxes(gp) {
+      if (!gp || !gp.axes) return null;
+      // Quest thumbstick = axes[2],[3]; fall back to [0],[1]
+      if (gp.axes.length >= 4) return [gp.axes[2], gp.axes[3]];
+      if (gp.axes.length >= 2) return [gp.axes[0], gp.axes[1]];
+      return null;
+    }
+
+    function updateLocomotion(dt) {
+      if (!renderer || !renderer.xr || !renderer.xr.isPresenting || !rig) return;
+      var session = renderer.xr.getSession && renderer.xr.getSession();
+      if (!session || !session.inputSources) return;
+
+      headPose(tmpV1, tmpQ);                     // head world pos + quat
+      tmpE.setFromQuaternion(tmpQ, 'YXZ');
+      var yaw = tmpE.y;
+      var rightX = 0;
+
+      for (var i = 0; i < session.inputSources.length; i++) {
+        var src = session.inputSources[i];
+        var ax = stickAxes(src.gamepad);
+        if (!ax) continue;
+        if (src.handedness === 'left') {
+          // smooth translate on XZ relative to head yaw
+          var len = Math.hypot(ax[0], ax[1]);
+          if (len > DEADZONE) {
+            var scale = Math.min(1, (len - DEADZONE) / (1 - DEADZONE));
+            tmpV2.set(ax[0] / len, 0, ax[1] / len)
+                 .applyAxisAngle(UP, yaw)
+                 .multiplyScalar(MOVE_SPEED * scale * dt);
+            rig.position.x += tmpV2.x;           // XZ only — no vertical
+            rig.position.z += tmpV2.z;
+          }
+        } else if (src.handedness === 'right') {
+          rightX = ax[0];
+        }
+      }
+
+      // snap turn — 30° per flick, must return to centre between snaps
+      if (snapReady && Math.abs(rightX) > SNAP_ON) {
+        var delta = -Math.sign(rightX) * SNAP_ANGLE;  // stick right = turn right
+        // pivot about the HEAD, not the rig origin, for comfort:
+        tmpV2.copy(tmpV1).sub(rig.position);          // head offset from rig
+        tmpV3.copy(tmpV2).applyAxisAngle(UP, delta);  // offset after turn
+        rig.rotation.y += delta;
+        rig.position.x += tmpV2.x - tmpV3.x;
+        rig.position.z += tmpV2.z - tmpV3.z;
+        snapReady = false;
+      } else if (!snapReady && Math.abs(rightX) < SNAP_OFF) {
+        snapReady = true;
+      }
+
+      // clamp to the walkable box
+      rig.position.x = Math.min(bounds.maxX, Math.max(bounds.minX, rig.position.x));
+      rig.position.z = Math.min(bounds.maxZ, Math.max(bounds.minZ, rig.position.z));
+    }
+
+    /* =====================================================
+       Per-frame update
+       ===================================================== */
+    function update(dt) {
+      if (disposed) return;
+      dt = (typeof dt === 'number' && isFinite(dt) && dt > 0)
+         ? Math.min(dt, 0.1) : 0.016;
+
+      // HUD lazy-follow (lerp toward target, never hard-locked)
+      if (hud.mesh.visible) {
+        hudTarget(tmpV3);
+        var k = 1 - Math.exp(-HUD_LERP_K * dt);
+        hud.mesh.position.lerp(tmpV3, k);
+        headPose(tmpV1, tmpQ);
+        hud.mesh.lookAt(tmpV1);
+      }
+
+      // button hover highlights (both controllers, XR only)
+      if (renderer && renderer.xr && renderer.xr.isPresenting) {
+        var hoverByPanel = {};
+        for (var i = 0; i < controllers.length; i++) {
+          var hit = controllerRaycast(controllers[i]);
+          if (hit && hit.button) {
+            hoverByPanel[hit.rec.mesh.userData.vruiPanelId] = hit.button.index;
+          }
+        }
+        for (var id in panels) {
+          var rec = panels[id];
+          if (!rec.group.visible) continue;
+          var want = (id in hoverByPanel) ? hoverByPanel[id] : -1;
+          if (want !== rec.hoveredIdx) drawPanel(rec, want);
+        }
+      }
+
+      updateLocomotion(dt);
+    }
+
+    /* =====================================================
+       Dispose
+       ===================================================== */
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (var i = 0; i < controllers.length; i++) {
+        controllers[i].removeEventListener('selectstart', onSelectStart);
+      }
+      controllers.length = 0;
+      if (root.parent) root.parent.remove(root);
+      for (var d = 0; d < disposables.length; d++) {
+        if (disposables[d] && disposables[d].dispose) disposables[d].dispose();
+      }
+      disposables.length = 0;
+      for (var id in panels) delete panels[id];
+    }
+
+    return {
+      showPanel: showPanel,
+      hidePanel: hidePanel,
+      hideAll: hideAll,
+      setHUDLine: setHUDLine,
+      update: update,
+      dispose: dispose,
+      _panels: panels   // exposed for tests / debugging
+    };
   };
 })();
 
