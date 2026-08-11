@@ -4180,6 +4180,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function pickAt(px, py) {
     ndc.set((px/innerWidth)*2-1, -(py/innerHeight)*2+1);
     rayc.setFromCamera(ndc, camera);
+    if (pInteract && pInteract.pick && pInteract.pick(rayc)) return;   // touch zones first
     const hit = rayc.intersectObjects(panels.map(p => p.face), false)[0];
     if (hit) selectPanel(panels[hit.object.userData.index]);
   }
@@ -4188,6 +4189,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (renderer.xr.isPresenting) return;
     ndc.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1);
     rayc.setFromCamera(ndc, camera);
+    if (pInteract && pInteract.hover) pInteract.hover(rayc);
     const hit = rayc.intersectObjects(panels.map(p => p.face), false)[0];
     panels.forEach(p => p.targetHover = 0);
     if (hit) panels[hit.object.userData.index].targetHover = 1;
@@ -4220,6 +4222,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     tmpM.identity().extractRotation(ctrl.matrixWorld);
     xrRay.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
     xrRay.ray.direction.set(0,0,-1).applyMatrix4(tmpM).normalize();
+    if (pInteract && pInteract.pick && pInteract.pick(xrRay)) return;
     const hit = xrRay.intersectObjects(panels.map(p => p.face), false)[0];
     if (hit) selectPanel(panels[hit.object.userData.index]);
   }
@@ -4322,7 +4325,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   // Warm the models shortly after the hub renders so the room is ready on click.
   setTimeout(preloadWard, 400);
 
-  function mountWard() {
+  let vrui = null, pInteract = null, heartViz = null, savedCPRView = null;
+  function mountWard(scn) {
     if (ward || typeof window.makeWardScene !== 'function') return;
     // Hide every current hub object except the camera rig; remember visibility.
     savedView = {
@@ -4352,12 +4356,36 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // distant diorama (desktop only; WebXR supplies its own projection).
     camera.fov = 70; camera.updateProjectionMatrix();
     rig.position.set(0.15, 1.62, 2.45); yaw = 0; pitch = -0.10; applyLook();
+
+    // Interaction layer: in-world menus + touchable patient + props.
+    try {
+      if (typeof window.makeVRUI === 'function') {
+        vrui = window.makeVRUI(THREE, scene, { renderer: renderer, camera: camera, rig: rig,
+          bounds: { minX: -2.2, maxX: 2.2, minZ: -2.0, maxZ: 4.2 } });
+      }
+      if (typeof window.makePatientInteract === 'function' && scn && scn.touchZones) {
+        pInteract = window.makePatientInteract(THREE, scene, {
+          renderer: renderer, camera: camera, rig: rig, vrui: vrui,
+          zones: scn.touchZones,
+          patientRef: { center: { x: -0.4, y: 0.78, z: -1.55 }, node: null },
+          onAction: function (actionId, zoneId, label) {
+            window.dispatchEvent(new CustomEvent('sim-zone-action',
+              { detail: { actionId: actionId, zoneId: zoneId, label: label } }));
+          }
+        });
+        pInteract.buildZones();
+      }
+    } catch (err) { /* interaction layer optional */ }
   }
   function unmountWard() {
     try { if (window.WardAudio) window.WardAudio.stop(); } catch (e) {}
     if (wardFx)    { try { wardFx.dispose(); }    catch (e) {} wardFx = null; }
     if (wardProps) { try { wardProps.dispose(); } catch (e) {} wardProps = null; }
     if (wardGrade) { try { wardGrade.dispose(); } catch (e) {} wardGrade = null; }
+    if (pInteract) { try { pInteract.dispose(); } catch (e) {} pInteract = null; }
+    if (vrui)      { try { vrui.dispose(); }      catch (e) {} vrui = null; }
+    if (heartViz)  { try { heartViz.dispose(); }  catch (e) {} heartViz = null; }
+    savedCPRView = null;
     if (ward) { try { ward.dispose(); } catch (e) {} ward = null; }
     if (savedView) {
       savedView.hidden.forEach(pair => { pair[0].visible = pair[1]; });
@@ -4393,7 +4421,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     latestVitals = null;
     const cine = window.Cinematic;
     if (cine) cine.fadeOut(0);            // hard-cut to black so the scene swap is hidden
-    mountWard();  // build the room first so we can anchor the monitor to the bedside
+    mountWard(e.detail && e.detail.scenario);  // room first; monitor anchors to its bedside
     if (!vitalsMon && typeof window.makeVitalsMonitor === 'function') {
       let pos = { x: 1.55, y: 1.5, z: -0.4 };
       if (ward && ward.bedsideAnchor) { const a = ward.bedsideAnchor(); pos = { x: a.x, y: a.y, z: a.z }; }
@@ -4403,6 +4431,40 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // Soundscape: sim-vitals-show is dispatched synchronously from the Begin
     // click, so start() runs inside the user gesture as Web Audio requires.
     if (window.WardAudio) { try { window.WardAudio.start(); } catch (err) {} }
+  });
+  window.addEventListener('sim-heart-show', function () {
+    if (!heartViz && typeof window.makeHeartViz === 'function') {
+      try { heartViz = window.makeHeartViz(THREE, scene, { camera: camera }); } catch (err) {}
+    }
+    if (heartViz) heartViz.show();
+  });
+  window.addEventListener('sim-heart-hide', function () { if (heartViz) heartViz.hide(); });
+  window.addEventListener('sim-heart-state', function (e) {
+    if (heartViz && e.detail) heartViz.setState(e.detail);
+  });
+  window.addEventListener('sim-prop', function (e) {
+    if (!pInteract || !e.detail) return;
+    const d = e.detail;
+    try {
+      if (d.prop === 'defib-pads') pInteract.showDefibPads();
+      else if (d.prop === 'shock') { pInteract.showDefibPads(); pInteract.shock(); }
+      else if (d.prop === 'cpr') { d.on ? pInteract.startCPR() : pInteract.stopCPR(); }
+      else if (d.prop === 'oxygen') { d.on === false ? pInteract.hideOxygenMask() : pInteract.showOxygenMask(); }
+      else if (d.prop === 'ecg') pInteract.showECGLeads();
+    } catch (err) {}
+  });
+  // CPR gets the overhead cinematic angle; restore the bedside view after.
+  window.addEventListener('sim-cpr-view', function (e) {
+    const cine = window.Cinematic; if (!cine || renderer.xr.isPresenting) return;
+    if (e.detail && e.detail.on) {
+      savedCPRView = { pos: rig.position.clone(), yaw: yaw, pitch: pitch };
+      cine.enterWard(cineRefs, { from: { pos: { x: rig.position.x, y: rig.position.y, z: rig.position.z }, yaw: yaw, pitch: pitch },
+        to: { pos: { x: -0.4, y: 2.5, z: -1.05 }, yaw: 0, pitch: -1.05 }, durationMs: 1100 });
+    } else if (savedCPRView) {
+      cine.enterWard(cineRefs, { from: { pos: { x: rig.position.x, y: rig.position.y, z: rig.position.z }, yaw: yaw, pitch: pitch },
+        to: { pos: { x: savedCPRView.pos.x, y: savedCPRView.pos.y, z: savedCPRView.pos.z }, yaw: savedCPRView.yaw, pitch: savedCPRView.pitch }, durationMs: 900 });
+      savedCPRView = null;
+    }
   });
   window.addEventListener('sim-vitals-update', function (e) {
     if (!e.detail) return;
@@ -4478,6 +4540,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     const dt = Math.min(0.1, Math.max(0, now - lastNow)); lastNow = now;
     applyWalk(dt);
+    if (pInteract) pInteract.update(dt);
+    if (vrui) vrui.update(dt);
+    if (heartViz) heartViz.update(dt, now);
     if (ward && latestVitals) ward.update(latestVitals, dt);
     if (wardFx) wardFx.update(dt, now);
     if (vitalsMon && latestVitals) vitalsMon.update(latestVitals, now);
@@ -5499,6 +5564,16 @@ if (typeof window !== 'undefined') {
           name: String(entry.name || entry.id || 'intervention'),
           atSeconds: gameState.timeElapsedSeconds
         });
+        // Arrest-only gate: some interventions (defibrillation, ACLS drugs, CPR)
+        // are indicated ONLY once the patient has arrested. Shocking a perfusing
+        // rhythm must not flip the recovery trajectory — it is itself harmful.
+        var arrestOnly = (scenario.arrestOnlyInterventions || []).indexOf(entry.id) !== -1;
+        var vNow = gameState.vitals || {};
+        var inArrest = (vNow.hr <= 30) || (vNow.sbp <= 40);
+        if (arrestOnly && !inArrest) {
+          assessmentParts.push(scenario.prematureInterventionNote ||
+            'Not indicated — the patient has a pulse and a perfusing rhythm. Reassess before acting.');
+        } else {
         gameState.vitals = clampVitals(applyVitalChanges(gameState.vitals, entry));
         if (isDefinitiveIntervention(entry)) {
           if (!gameState.epinephrineGiven) {
@@ -5527,6 +5602,7 @@ if (typeof window !== 'undefined') {
         }
         if (entry.response || entry.dialogue) dialogue = entry.response || entry.dialogue;
         if (entry.cues || entry.visibleCues) cues = (entry.cues || entry.visibleCues).slice();
+        }
       } else {
         assessmentParts.push('That action is not an effective intervention here; the patient continues on the untreated course.');
       }
@@ -6451,7 +6527,7 @@ if (typeof window !== 'undefined') {
         '” is coming soon — the Emergency Response case is the live build.');
       return;
     }
-    SCN = window.ANAPHYLAXIS_SCENARIO;
+    SCN = window.MI_SCENARIO || window.ANAPHYLAXIS_SCENARIO;
     if (!SCN) { toast('Scenario data failed to load.'); return; }
     if (started) return;
     if (!hasKey()) showKeyGate(showBrief); else showBrief();
@@ -6534,15 +6610,79 @@ if (typeof window !== 'undefined') {
   // =====================================================================
   // 3. LIVE CASE — command box, dialogue log, sim clock
   // =====================================================================
+  var cprOn = false, nudgesFired = {};
+  function visualsFor(text) {
+    var t = String(text || '').toLowerCase();
+    if (/\b(cpr|compress)/.test(t)) { cprOn = true; emit('sim-prop', { prop: 'cpr', on: true }); emit('sim-cpr-view', { on: true }); }
+    if (/\b(defib|shock|joule|charge)/.test(t)) {
+      if (cprOn) { cprOn = false; emit('sim-prop', { prop: 'cpr', on: false }); emit('sim-cpr-view', { on: false }); }
+      emit('sim-prop', { prop: 'shock' });
+    }
+    if (/\b(pads?)\b/.test(t)) emit('sim-prop', { prop: 'defib-pads' });
+    if (/\b(oxygen|o2|mask)\b/.test(t)) emit('sim-prop', { prop: 'oxygen', on: true });
+    if (/\b(ecg|ekg|12.?lead|leads|monitor leads)/.test(t)) emit('sim-prop', { prop: 'ecg' });
+  }
+  function quickAssess(zone, what) {
+    var st = PatientLoop.getState && PatientLoop.getState();
+    if (!st || !st.vitals) return 'No reading available.';
+    var v = st.vitals, w = String(what || zone || '').toLowerCase();
+    if (/pulse|radial|carotid/.test(w)) {
+      if (v.hr <= 30 || v.sbp <= 40) return 'No palpable pulse.';
+      return (v.sbp < 90 ? 'Weak, thready ' : 'Palpable ') + 'pulse, rate about ' + v.hr + '.';
+    }
+    if (/breath|lung|resp|airway/.test(w)) {
+      if (v.rr <= 6) return 'Agonal or absent breathing.';
+      return 'Respiratory rate about ' + v.rr + (v.spo2 < 92 ? ', looks hypoxic — sats ' + v.spo2 + '%.' : ', sats ' + v.spo2 + '%.');
+    }
+    if (/skin|cap|perfusion/.test(w)) return (v.spo2 < 88 || v.sbp < 85) ? 'Pale, cool, clammy; sluggish cap refill.' : 'Warm, slightly diaphoretic.';
+    return 'HR ' + v.hr + ', BP ' + v.sbp + '/' + v.dbp + ', SpO2 ' + v.spo2 + '%, RR ' + v.rr + '.';
+  }
+  window.addEventListener('sim-zone-action', function (ev) {
+    if (!started || !ev.detail || !SCN) return;
+    var d = ev.detail, maps = null;
+    (SCN.touchZones || []).forEach(function (z) {
+      (z.actions || []).forEach(function (a) { if (a.id === d.actionId) maps = a.mapsTo; });
+    });
+    if (!maps) return;
+    if (/^assess-/.test(maps)) {
+      var reading = quickAssess(d.zoneId, maps.replace('assess-', ''));
+      appendLog('cue', d.label + ': ' + reading);
+      if (window.DoctorLink) window.DoctorLink.event('Trainee checked ' + d.label + ' — finding: ' + reading);
+    } else {
+      appendLog('you', d.label + ' (bedside)');
+      visualsFor(maps + ' ' + d.label);
+      Promise.resolve(PatientLoop.sendCommand(maps)).catch(function () {});
+    }
+  });
+
   function beginCase() {
     started = true; reported = false;
+    cprOn = false; nudgesFired = {};
+    if (window.DoctorLink) {
+      try {
+        window.DoctorLink.init({
+          onOrder: function (action, rationale) {
+            var full = rationale ? (action + ' because ' + rationale) : action;
+            appendLog('you', '🎤 ' + full);
+            visualsFor(full);
+            Promise.resolve(PatientLoop.sendCommand(full)).catch(function () {});
+          },
+          onShowHeart: function () { emit('sim-heart-show', {}); pushHeartState(PatientLoop.getState()); },
+          onHideHeart: function () { emit('sim-heart-hide', {}); },
+          onAssess: function (zone, what) { var r = quickAssess(zone, what); appendLog('cue', 'Assessed ' + (what || zone) + ': ' + r); return r; },
+          onEnd: function () { endCase('ended'); },
+          onStatus: function (st) { setChip(st === 'listening' ? 'DR. OKAFOR LISTENING' : (st === 'agent-speaking' ? 'DR. OKAFOR' : (hasKey() ? 'LIVE AI' : 'SCRIPTED (offline)')), CY); },
+          onTranscript: function (who, text) { if (who === 'agent') appendLog('doctor', text); }
+        });
+      } catch (err) {}
+    }
     PatientLoop.init(SCN, {
       onTurn: renderTurn,
       onError: function (msg, degraded) { toast(msg); if (degraded) setChip('SCRIPTED (offline)', AMBER); },
       onEnd: finish
     });
     buildHud();
-    emit('sim-vitals-show', { normalRanges: SCN.normalRanges });   // hub spawns the 3D monitor
+    emit('sim-vitals-show', { normalRanges: SCN.normalRanges, scenario: SCN });   // hub spawns room+monitor
     PatientLoop.start();   // fires onTurn(seed) itself — no manual render
   }
 
@@ -6601,15 +6741,38 @@ if (typeof window !== 'undefined') {
   function submitCommand(text) {
     busy = true; setChip(hasKey() ? 'PATIENT RESPONDING…' : 'SCRIPTED', hasKey() ? CY : AMBER);
     appendLog('you', text);
+    visualsFor(text);
     Promise.resolve(PatientLoop.sendCommand(text)).then(function () {
       busy = false; if (started) setChip(hasKey() ? 'LIVE AI' : 'SCRIPTED (offline)', hasKey() ? CY : AMBER);
     }).catch(function () { busy = false; });
   }
 
   // onTurn handler — the loop fires this for the seed, every command, and every wait.
+  function pushHeartState(st) {
+    if (!st || !st.vitals) return;
+    var v = st.vitals, mode;
+    var arrested = (v.hr <= 30 || v.sbp <= 40);
+    if (arrested) mode = cprOn ? 'cpr' : (v.hr <= 5 ? 'asystole' : 'vf');
+    else if (st.trajectory === 'treated') mode = 'rosc';
+    else if (SCN && SCN.id === 'emerg' && (v.sbp < 118 || st.timeElapsedSeconds > 60)) mode = 'ischemia';
+    else mode = 'baseline';
+    emit('sim-heart-state', { mode: mode, hr: Math.max(v.hr, mode === 'vf' ? 0 : v.hr),
+      contractility: Math.max(0, Math.min(1, v.sbp / 130)) });
+  }
   function renderTurn(st) {
     if (!st) return;
     if (typeof st.timeElapsedSeconds === 'number') setClock(st.timeElapsedSeconds);
+    pushHeartState(st);
+    if (window.DoctorLink && st.vitals) {
+      window.DoctorLink.vitals(st.vitals);
+      (SCN.doctorNudges || []).forEach(function (n, i) {
+        if (nudgesFired[i]) return;
+        var due = (typeof n.atSeconds === 'number' && st.timeElapsedSeconds >= n.atSeconds) ||
+                  (n.onEvent === 'arrest' && (st.vitals.hr <= 30 || st.vitals.sbp <= 40)) ||
+                  (n.onEvent === 'post-rosc' && st.trajectory === 'treated');
+        if (due) { nudgesFired[i] = true; try { window.DoctorLink.nudge(n.text); } catch (err) {} }
+      });
+    }
     if (st.patientDialogue) appendLog('patient', st.patientDialogue);
     if (st.lastAssessment) appendLog('assess', st.lastAssessment);
     if (st.visibleCues && st.visibleCues.length) appendLog('cue', 'You observe: ' + st.visibleCues.join(', ') + '.');
@@ -6622,7 +6785,8 @@ if (typeof window !== 'undefined') {
     var wrap = el('div', 'margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.06);');
     var tag = {
       you: ['YOU', CY], patient: ['PATIENT', '#fff'],
-      cue: ['OBSERVED', AMBER], assess: ['CLINICAL NOTE', GREEN]
+      cue: ['OBSERVED', AMBER], assess: ['CLINICAL NOTE', GREEN],
+      doctor: ['DR. OKAFOR', '#d9b3ff']
     }[kind] || ['', '#fff'];
     wrap.appendChild(el('div', 'font:700 10px sans-serif;letter-spacing:1px;color:' + tag[1] + ';margin-bottom:2px;', tag[0]));
     var body = (kind === 'patient') ? '#eafcff' : '#cfe9f5';
@@ -6706,17 +6870,23 @@ if (typeof window !== 'undefined') {
     }
 
     // key-action assessment: time-to-epinephrine vs the guideline-grounded target
-    card.appendChild(el('div', 'font:700 12px sans-serif;letter-spacing:1px;color:' + CY + ';margin:6px 0 8px;', 'KEY ACTION — EPINEPHRINE'));
+    // Generic: the scenario declares its own definitive treatment + timing target.
+    var defEntry = (SCN.interventions || []).filter(function (iv) { return iv.effect && iv.effect.definitive; })[0] || {};
+    var defName = (defEntry.label || 'the definitive treatment').split('(')[0].trim();
+    card.appendChild(el('div', 'font:700 12px sans-serif;letter-spacing:1px;color:' + CY + ';margin:6px 0 8px;',
+      'KEY ACTION — ' + defName.toUpperCase()));
     var rub = SCN.scoringRubric || {};
-    var target = typeof rub.timeToEpinephrineTargetSeconds === 'number' ? rub.timeToEpinephrineTargetSeconds : 60;
+    var target = null;
+    for (var rk in rub) { if (/^timeTo.*TargetSeconds$/.test(rk) && typeof rub[rk] === 'number') { target = rub[rk]; break; } }
+    if (target == null) target = 120;
     var line, col;
     if (summary.epinephrineGiven && summary.epinephrineGivenAtSeconds != null) {
+      // (engine field name is historical: it records WHEN the definitive treatment was given)
       var at = summary.epinephrineGivenAtSeconds;
-      if (at <= target) { line = 'IM epinephrine given at ' + fmt(at) + ' — within the ' + target + 's target. ✓'; col = GREEN; }
-      else if (at <= 240) { line = 'IM epinephrine given at ' + fmt(at) + ' — later than the ' + target + 's target.'; col = AMBER; }
-      else { line = 'IM epinephrine delayed to ' + fmt(at) + ' — past the 4-minute hard-fail threshold.'; col = RED; }
+      if (at <= target) { line = defName + ' given at ' + fmt(at) + ' — within the ' + target + 's target. ✓'; col = GREEN; }
+      else { line = defName + ' given at ' + fmt(at) + ' — later than the ' + target + 's target.'; col = AMBER; }
     } else {
-      line = 'IM epinephrine was never given — the definitive treatment for anaphylaxis was missed.'; col = RED;
+      line = defName + ' was never given — the definitive treatment was missed.'; col = RED;
     }
     card.appendChild(el('div', 'color:' + col + ';margin-bottom:14px;', line));
 
@@ -10498,6 +10668,8 @@ if (typeof window !== 'undefined') {
      stop()  -> Promise   (tears down mic + WS cleanly)
      toggle()
      isActive() -> boolean
+     registerTool(name, handler) -> boolean   (add/override a client tool)
+     sendContext(text) -> boolean             (contextual_update client event)
    Also listens for CustomEvent 'sim-voice-toggle' on window -> toggle().
    ===================================================================== */
 (function () {
@@ -10603,6 +10775,34 @@ if (typeof window !== 'undefined') {
     spawn_item: async (p) => issueOrder(
       'get ' + ((p && p.item) || 'equipment'), p && p.rationale, 'Asked for it.'),
   };
+
+  // Generic extension points (used by e.g. window.DoctorLink) ---------------
+  // registerTool: add or override a client tool handler at runtime. The agent
+  // still only calls tools its platform config lists; this just decides what
+  // happens sim-side when it does. handler(params) may return a string (sent
+  // back as the tool result) or a Promise of one.
+  function registerTool(name, handler) {
+    if (!name || typeof handler !== 'function') {
+      console.warn('[VoiceBridge] registerTool: need a name and a function.');
+      return false;
+    }
+    TOOLS[String(name)] = handler;
+    return true;
+  }
+
+  // sendContext: push a contextual update to the live conversation (the
+  // ElevenLabs "contextual_update" client event — informs the agent without
+  // taking a turn). No-op (returns false) when the socket is not open.
+  function sendContext(text) {
+    const t = String(text == null ? '' : text).trim();
+    if (!t || !ws || ws.readyState !== 1) return false;
+    try {
+      ws.send(JSON.stringify({ type: 'contextual_update', text: t }));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
 
   // ---- audio: base64 <-> PCM (ported verbatim) ---------------------------
   function b64ToInt16(b64) {
@@ -10879,6 +11079,7 @@ if (typeof window !== 'undefined') {
 
   window.VoiceBridge = {
     init, start, stop, toggle, isActive,
+    registerTool, sendContext,
     state: () => state,
     agentId: AGENT_ID,
   };
@@ -11451,6 +11652,2294 @@ if (typeof window !== 'undefined') {
       dispose: dispose,
       _panels: panels   // exposed for tests / debugging
     };
+  };
+})();
+
+</script>
+<script>
+/*
+ * ============================================================================
+ *  "CODE IN BAY 2" — Acute inferior STEMI -> VF cardiac arrest scenario
+ *  (clinical data layer)
+ * ============================================================================
+ *  DRAFT — clinical content pending review by a licensed educator.
+ *
+ *  Guidelines checked (web-verified 2026-08-11):
+ *   - American Heart Association, "2020 Guidelines for CPR and Emergency
+ *     Cardiovascular Care — Part 3: Adult Basic and Advanced Life Support"
+ *     (Circulation 2020;142:S366-S468) [cited below as "AHA 2020"]
+ *   - 2025 ACC/AHA/ACEP/NAEMSP/SCAI "Guideline for the Management of Patients
+ *     With Acute Coronary Syndromes" (Circulation 2025) [cited as
+ *     "ACC/AHA 2025"]
+ *   - 2013 ACCF/AHA STEMI guideline (Circulation 2013;127:e362-e425) —
+ *     nitroglycerin dosing/contraindication details carried forward
+ *     [cited as "ACC/AHA 2013"]
+ *   - European Resuscitation Council Guidelines 2021: Adult Advanced Life
+ *     Support (Resuscitation 2021;161:115-151) [cited as "ERC 2021"] —
+ *     used as the acceptable cross-check (ERC gives epinephrine after the
+ *     3rd shock in shockable rhythms; AHA 2020 depicts it after the 2nd —
+ *     the AHA sequence is used here)
+ *
+ *  Key verified numbers:
+ *   - Defibrillation, adult VF/pVT: biphasic at the MANUFACTURER'S
+ *     recommended energy (e.g. initial dose 120-200 J); if unknown, use the
+ *     MAXIMUM available. Monophasic: 360 J. Single shock, then immediately
+ *     resume CPR for 2 min before the next rhythm check (AHA 2020).
+ *   - Epinephrine in arrest: 1 mg IV/IO every 3-5 min; for shockable
+ *     rhythms, given after the SECOND shock fails (AHA 2020; ERC 2021 uses
+ *     after the 3rd shock — both give 1 mg q3-5min).
+ *   - Amiodarone for shock-refractory VF/pVT: 300 mg IV bolus after the 3rd
+ *     shock, second dose 150 mg (AHA 2020; ERC 2021 same doses).
+ *   - CPR quality: rate 100-120/min, depth at least 2 in (5 cm) and no more
+ *     than 2.4 in (6 cm), full recoil, interruptions <10 s, chest-compression
+ *     fraction as high as possible (target >=60%), rotate compressor every
+ *     2 min (AHA 2020 BLS).
+ *   - Aspirin in suspected ACS: 162-325 mg non-enteric-coated, CHEWED
+ *     (ACC/AHA 2025; AHA 2020 ACS chain of survival).
+ *   - Oxygen in ACS: only if SpO2 <90% — routine O2 in normoxic MI shows no
+ *     benefit and possible harm; post-arrest ROSC target SpO2 92-98%
+ *     (ACC/AHA 2025; AHA 2020 post-cardiac-arrest care).
+ *   - Nitroglycerin: 0.3-0.4 mg SL every 5 min, max 3 doses (ACC/AHA 2013).
+ *     CONTRAINDICATED: SBP <90 mmHg or >=30 mmHg below baseline, marked
+ *     bradycardia (<50) or tachycardia, suspected RV infarction (obtain
+ *     right-sided leads V4R in inferior STEMI), or PDE5-inhibitor use —
+ *     within 24 h of sildenafil/vardenafil, 48 h of tadalafil, 12 h of
+ *     avanafil (ACC/AHA 2013; ACC/AHA 2025).
+ *   - Morphine in ACS: reserve for refractory ischemic pain (morphine or
+ *     fentanyl); caution — slows P2Y12-inhibitor absorption and drops
+ *     preload (ACC/AHA 2025).
+ *   - 12-lead ECG within 10 min of first medical contact for suspected ACS
+ *     (ACC/AHA 2025).
+ * ============================================================================
+ */
+
+const MI_SCENARIO = {
+  id: 'emerg',                                  // matches the hub panel id
+  title: 'Code in Bay 2',
+  subtitle: 'Acute MI to cardiac arrest',
+  difficulty: 'Experienced',
+
+  // --------------------------------------------------------------- PATIENT
+  // Fictional patient — any resemblance to a real person is coincidental.
+  patient: {
+    name: 'Walter Brandt',
+    age: 61,
+    sex: 'male',
+    weightKg: 92,
+    allergies: 'No known drug allergies',
+    background:
+      '61-year-old male, post-operative day 1 after an elective right total ' +
+      'knee replacement under spinal anaesthetic. History: hypertension, ' +
+      'type 2 diabetes, dyslipidemia, 30 pack-year smoker (quit 2 years ' +
+      'ago). Home meds include metoprolol and atorvastatin; his aspirin was ' +
+      'held pre-operatively and has not been restarted. Saline-locked IV in ' +
+      'the left forearm. Post-op patients with untreated coronary risk ' +
+      'factors are a classic setting for perioperative MI, and held ' +
+      'antiplatelets are a recognized contributor.'
+  },
+
+  // ------------------------------------------------------------------ SBAR
+  sbar: {
+    situation:
+      'This is Walter Brandt in bay 2, 61-year-old male, post-op day 1 from ' +
+      'a right total knee replacement. He just put his call light on saying ' +
+      'he has a heavy pressure in his chest and he looks grey and sweaty.',
+    background:
+      'Elective knee replacement yesterday under spinal, uneventful. ' +
+      'Hypertension, type 2 diabetes, high cholesterol, ex-smoker. On ' +
+      'metoprolol and a statin; his home aspirin was held for surgery and ' +
+      'has not been restarted. Saline lock in the left forearm, no fluids ' +
+      'running. Weighs about 92 kilos.',
+    assessment:
+      'Overnight he was fine — heart rate in the 80s, blood pressure around ' +
+      '150 systolic, sats 96% on room air. Right now he is clutching his ' +
+      'chest, diaphoretic, and says it feels like "an elephant sitting on ' +
+      'me". I have not repeated vitals or done an ECG yet.',
+    recommendation:
+      'Please assess him immediately. The 12-lead machine is outside the ' +
+      'bay, the crash cart with the defibrillator is at the nursing ' +
+      'station, and the rapid response number is on the wall. I have to ' +
+      'help with a fall in the next room — you have him.'
+  },
+
+  // Verbatim brief read to the trainee before the sim starts.
+  handoffScript:
+    'You\'re taking over bay 2 — Walter Brandt, 61, day one after a knee ' +
+    'replacement. Hypertensive diabetic ex-smoker, and heads up: his home ' +
+    'aspirin was held for surgery and never restarted. He\'s just rung the ' +
+    'bell with heavy chest pressure, he\'s grey and sweating, and he told ' +
+    'me it feels like an elephant on his chest. Twelve-lead machine is ' +
+    'right outside, crash cart\'s at the station. I\'ve got a fall next ' +
+    'door — he\'s all yours.',
+
+  // What the trainee must recognize; never shown to them.
+  hiddenCondition:
+    'Evolving inferior STEMI (occluded right coronary artery) with right ' +
+    'ventricular involvement — right-sided lead V4R shows ST elevation if ' +
+    'obtained, making the patient preload-dependent (nitrates hazardous — ' +
+    'ACC/AHA 2013/2025). The ischemic myocardium becomes electrically ' +
+    'unstable and degenerates into ventricular fibrillation at ~200 s ' +
+    'REGARDLESS of phase-1 care: this arrest is scripted and cannot be ' +
+    'prevented, only survived. The definitive response is high-quality CPR ' +
+    'plus prompt defibrillation (AHA 2020).',
+
+  // -------------------------------------------------------- INITIAL VITALS
+  // ~2-3 minutes into symptom onset: catecholamine surge of acute ischemic
+  // chest pain — hypertensive, tachycardic, mildly tachypneic, SpO2 still
+  // >=90 so supplemental oxygen is NOT yet indicated (ACC/AHA 2025).
+  // Sits on the t=0s keyframe below.
+  initialVitals: {
+    hr: 104,      // beats/min — sinus tachycardia despite home beta-blocker
+    sbp: 158,     // mmHg — pain/catecholamine surge above his 150 baseline
+    dbp: 94,      // mmHg
+    spo2: 96,     // % on room air — oxygen not indicated (>=90, ACC/AHA 2025)
+    rr: 22,       // breaths/min
+    tempC: 36.8   // MI does not acutely cause fever; stays flat
+  },
+
+  // Monitor color thresholds (standard adult reference ranges).
+  normalRanges: {
+    hr:    [60, 100],
+    sbp:   [90, 140],
+    spo2:  [95, 100],
+    rr:    [12, 20],
+    tempC: [36.1, 37.9]
+  },
+
+  // ----------------------------------------------------- PROGRESSION RULES
+  // DESIGN NOTE — how this scenario maps onto the engine:
+  //  * The VF arrest is SCRIPTED: no phase-1 intervention is definitive.
+  //    Aspirin/ECG/rapid-response are scored and may slow the pre-arrest
+  //    slope (the engine may apply its non-definitive slope modifiers,
+  //    delaying arrest from ~200 s toward ~300 s with complete phase-1
+  //    care), but the patient ALWAYS arrests. This is deliberate: phase 1
+  //    teaches ACS recognition, phase 2 teaches arrest response.
+  //  * The arrest keyframe carries critical:false so the sim KEEPS RUNNING
+  //    into the resuscitation phase; only the terminal asystole keyframe at
+  //    500 s is critical:true (unsurvivable end-state).
+  //  * VF is modeled as hr 0 / sbp 0 / rr 0 (no perfusing beats — the
+  //    monitor waveform shows fibrillation; SpO2 pleth becomes unreliable
+  //    and the displayed value decays as no-flow time accrues).
+  //  * 'defibrillate' is the definitive intervention: it flips to the
+  //    treated[] ROSC trajectory (engine re-anchors the clock to the
+  //    shock). 'start-cpr' is correct but NOT definitive — it pauses the
+  //    SpO2/perfusion decay (small vitals bump) and resets the engine's
+  //    no-flow timer so a later shock still succeeds.
+  progressionRules: {
+    collapseBySeconds: 200,   // VF onset ~3.3 min in; primary VF is an early
+                              // complication of acute STEMI (AHA 2020 chain
+                              // of survival rationale — most adult sudden
+                              // cardiac death is arrhythmic after ACS)
+    interpolate: 'linear',
+    untreated: [
+      //  atSeconds, absolute vitals, observable cue(s)
+      { atSeconds: 0,   vitals: { hr: 104, sbp: 158, dbp: 94, spo2: 96, rr: 22 },
+        cues: ['Clutching sternum with a fist (Levine sign); grey, diaphoretic; rates the pressure 8/10, "like an elephant sitting on me".'] },
+      { atSeconds: 60,  vitals: { hr: 112, sbp: 164, dbp: 96, spo2: 95, rr: 24 },
+        cues: ['Pain now 9/10, radiating to the left arm and jaw; nauseated; skin cold and clammy.'] },
+      { atSeconds: 120, vitals: { hr: 118, sbp: 148, dbp: 88, spo2: 94, rr: 26 },
+        cues: ['Monitor shows occasional PVCs; patient pale, restless; "something is really wrong".',
+               'If the 12-lead has been run: ST elevation in II, III, aVF with reciprocal depression in I and aVL — inferior STEMI.'] },
+      { atSeconds: 180, vitals: { hr: 124, sbp: 128, dbp: 78, spo2: 93, rr: 28 },
+        cues: ['Frequent PVCs, now in couplets and a short run of VT; BP sliding DOWN (now 30 mmHg below his baseline — nitrate window has closed, ACC/AHA 2013); says "I think I\'m going to die".'],
+        dialogue: '"My chest... I can\'t... it\'s crushing me..."' },
+      // ----- ARREST: primary VF. critical:false — the sim MUST keep running.
+      { atSeconds: 200, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 90, rr: 0 },
+        cues: ['Eyes roll back; slumps mid-sentence, unresponsive; no carotid pulse; agonal gasp then apnoea. Monitor: coarse VENTRICULAR FIBRILLATION.'],
+        dialogue: 'The patient is unresponsive with no palpable pulse. The monitor shows coarse VF.',
+        critical: false },
+      { atSeconds: 260, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 78, rr: 0 },
+        cues: ['One minute of no-flow: central cyanosis spreading; pupils sluggish; VF still coarse — still highly shockable (AHA 2020: shock success falls with every minute of delay).'] },
+      { atSeconds: 380, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 60, rr: 0 },
+        cues: ['Three minutes of no-flow: VF amplitude decaying from coarse toward fine; mottling of the face and chest.'] },
+      // Terminal state if the trainee never resuscitates — critical:true.
+      { atSeconds: 500, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 40, rr: 0 },
+        cues: ['Fine VF degenerates to ASYSTOLE. Five minutes with no CPR and no shock — this is no longer survivable.'],
+        dialogue: 'Flatline. The resuscitation window has closed.',
+        critical: true }
+    ],
+    // Recovery after successful defibrillation (the definitive intervention).
+    // Timed from the shock. DRAFT recovery curve pending educator review;
+    // shape grounded in AHA 2020 post-cardiac-arrest care: ROSC with initial
+    // sinus tachycardia and post-arrest hypotension, oxygenation titrated to
+    // SpO2 92-98%, SBP supported >90 mmHg.
+    treated: [
+      { atSeconds: 15,  vitals: { hr: 128, sbp: 78, dbp: 48, spo2: 84, rr: 4 },
+        cues: ['Rhythm check: organized narrow-complex rhythm; faint carotid pulse — ROSC. Post-arrest hypotension; breaths agonal, assist ventilation.'] },
+      { atSeconds: 60,  vitals: { hr: 112, sbp: 94, dbp: 58, spo2: 91, rr: 10 },
+        cues: ['Colour returning; spontaneous breaths resuming; groans to voice. Titrate O2 toward SpO2 92-98% (AHA 2020 post-ROSC).'] },
+      { atSeconds: 120, vitals: { hr: 102, sbp: 106, dbp: 64, spo2: 95, rr: 14 },
+        cues: ['Sinus rhythm with residual inferior ST elevation on repeat 12-lead — he still needs the cath lab (ACC/AHA 2025: reperfusion after ROSC with STEMI).'] },
+      { atSeconds: 180, vitals: { hr: 96, sbp: 112, dbp: 68, spo2: 96, rr: 16 },
+        dialogue: '"...what happened? My chest still hurts..."',
+        cues: ['Awake, confused but following commands. Package for the cath lab: monitor on, defib pads stay on, handover ready.'] }
+    ],
+    description:
+      'Occluded right coronary artery: ischemic inferior wall (crushing ' +
+      'pain, catecholamine surge) with RV involvement (BP falls as preload ' +
+      'dependence develops), escalating ventricular ectopy, then primary VF ' +
+      'at ~200 s. The arrest is scripted — no phase-1 action prevents it, ' +
+      'though complete phase-1 care may delay it (engine slope modifier). ' +
+      'After VF: every minute without CPR/defibrillation decays SpO2 and ' +
+      'shock success; CPR pauses the decay (resets the no-flow timer); only ' +
+      'defibrillation converts the rhythm and flips to the treated ROSC ' +
+      'trajectory (AHA 2020).'
+  },
+
+  // ---------------------------------------------------------- INTERVENTIONS
+  interventions: [
+    {
+      id: 'ecg-12-lead',
+      label: 'Acquire 12-lead ECG (add right-sided V4R)',
+      aliases: ['get an ecg', 'twelve lead', '12 lead', 'run an ecg',
+                'get the ekg', 'hook up the twelve lead', 'right-sided leads',
+                'do an ecg'],
+      correct: true,
+      requiresRationale: false,
+      effect: {
+        onVitals:
+          'No physiologic effect. Reveals inferior STEMI (ST elevation II, ' +
+          'III, aVF; reciprocal depression I, aVL). If right-sided V4R is ' +
+          'requested, reveals RV involvement — flags nitrates as hazardous ' +
+          'and unlocks full Interpret credit.',
+        definitive: false,
+        onsetSeconds: 45,
+        note: 'Target: acquired within 10 minutes of first contact for ' +
+              'suspected ACS (ACC/AHA 2025). Obtain V4R in every inferior ' +
+              'STEMI before considering nitrates.'
+      },
+      clinicalNote:
+        'A 12-lead ECG within 10 minutes of first medical contact is the ' +
+        'pivotal triage test in suspected ACS; right-sided leads should be ' +
+        'checked in inferior STEMI to detect RV infarction (ACC/AHA 2025; ' +
+        'ACC/AHA 2013).'
+    },
+    {
+      id: 'aspirin',
+      label: 'Aspirin 162-325 mg non-enteric-coated, chewed',
+      aliases: ['give aspirin', 'asa', 'chew an aspirin', 'three twenty five of aspirin',
+                'baby aspirins', 'give him asa to chew'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'No visible vital-sign change in-sim. Antiplatelet effect limits ' +
+          'thrombus propagation; engine credits it under Respond and may ' +
+          'apply a small pre-arrest slope reduction. Does NOT prevent the ' +
+          'scripted VF arrest.',
+        definitive: false,
+        onsetSeconds: 60,
+        note: 'Chewed non-enteric-coated tablets for fastest absorption. ' +
+              'His home aspirin was held post-op — this is the gap to spot.'
+      },
+      clinicalNote:
+        'Aspirin 162-325 mg chewed as soon as possible in suspected ACS ' +
+        'unless contraindicated; one of the few pre-reperfusion drugs with ' +
+        'proven mortality benefit (ACC/AHA 2025).'
+    },
+    {
+      id: 'call-code',
+      label: 'Call for help — rapid response, then code blue at arrest',
+      aliases: ['call a code', 'code blue', 'call rapid response', 'get the crash cart',
+                'call the team', 'activate the cath lab', 'push the code button',
+                'get help in here'],
+      correct: true,
+      requiresRationale: false,
+      effect: {
+        onVitals:
+          'No direct vital effect. Team (and crash cart with defibrillator) ' +
+          'arrives at +60 s; before arrest this also triggers cath-lab ' +
+          'activation for the STEMI. Calling BEFORE the arrest shortens the ' +
+          'time-to-defibrillator when VF hits.',
+        definitive: false,
+        onsetSeconds: 60,
+        note: 'STEMI needs cath-lab activation NOW; VF needs a code team ' +
+              'and a defibrillator at the bedside. Early recognition and ' +
+              'activation is the first link in the chain of survival.'
+      },
+      clinicalNote:
+        'Immediate activation of the emergency response system is the first ' +
+        'link in the in-hospital chain of survival (AHA 2020); suspected ' +
+        'STEMI mandates rapid reperfusion-team activation (ACC/AHA 2025).'
+    },
+    {
+      id: 'oxygen-titrated',
+      label: 'Oxygen — ONLY if SpO2 <90%, titrated (post-ROSC target 92-98%)',
+      aliases: ['give oxygen', 'put on oxygen', 'nasal cannula', 'titrate the O2',
+                'oxygen if his sats drop', 'sats-guided oxygen'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'If SpO2 <90: +3-4% within 60 s. If SpO2 >=90 (as at sim start, ' +
+          '96%): no benefit — engine credits WITHHOLDING routine O2 and ' +
+          'flags reflexive high-flow O2 in a normoxic MI as a knowledge ' +
+          'gap. Post-ROSC: titrate to SpO2 92-98%, avoiding hyperoxia.',
+        definitive: false,
+        onsetSeconds: 30,
+        note: 'Routine oxygen in normoxic ACS shows no benefit and possible ' +
+              'harm (larger infarcts). The correct verbalization is ' +
+              '"oxygen only if his sats fall below 90".'
+      },
+      clinicalNote:
+        'Supplemental oxygen only for SpO2 <90% in ACS — trials in ' +
+        'normoxic MI show no benefit and possible increased myocardial ' +
+        'injury (ACC/AHA 2025); after ROSC titrate to SpO2 92-98% ' +
+        '(AHA 2020).'
+    },
+    {
+      id: 'nitroglycerin',
+      label: 'Nitroglycerin 0.3-0.4 mg SL (check BP, V4R, PDE5 use FIRST)',
+      aliases: ['give nitro', 'nitroglycerin', 'nitro spray', 'sublingual nitro',
+                'point four of nitro', 'gtn'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'CONDITIONAL HARM. This patient has an inferior STEMI with RV ' +
+          'involvement (preload-dependent): even a "safe-window" dose drops ' +
+          'SBP 20-30 mmHg within 60 s. Given early (SBP >=90 and not yet 30 ' +
+          'below his 158 baseline, checks verbalized) it is defensible and ' +
+          'scored as correct-with-caution; the V4R finding should make the ' +
+          'trainee WITHHOLD it. After ~180 s (SBP 128 = 30 below baseline) ' +
+          'it routes to the nitro-when-hypotensive harm effect instead.',
+        definitive: false,
+        onsetSeconds: 60,
+        note: 'Dose 0.3-0.4 mg SL q5min, max 3 doses. Before EVERY dose ' +
+              'verify: SBP >=90 and not >=30 mmHg below baseline, HR 50-100, ' +
+              'no RV infarction (check V4R), no PDE5 inhibitor (sildenafil/' +
+              'vardenafil 24 h, tadalafil 48 h, avanafil 12 h).'
+      },
+      clinicalNote:
+        'Nitrates relieve ischemic pain but are contraindicated with ' +
+        'hypotension (SBP <90 or >=30 below baseline), marked brady/' +
+        'tachycardia, RV infarction, or recent PDE5-inhibitor use ' +
+        '(ACC/AHA 2013; ACC/AHA 2025). In inferior STEMI, check V4R first.'
+    },
+    {
+      id: 'morphine-iv',
+      label: 'Morphine 2-4 mg IV for refractory ischemic pain (use caution)',
+      aliases: ['give morphine', 'morphine for the pain', 'opioid for chest pain',
+                'two of morphine', 'fentanyl for pain'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'Pain score falls; SBP -5-10 mmHg and RR -2 within 3 min. In this ' +
+          'preload-dependent RV-involved patient the BP dip is amplified ' +
+          '(engine: extra -5 mmHg). Reserve for pain refractory to other ' +
+          'measures — not a reflex first drug.',
+        definitive: false,
+        onsetSeconds: 120,
+        note: 'Caution: opioids slow absorption of oral P2Y12 inhibitors ' +
+              'and reduce preload. Second-line for refractory pain only ' +
+              '(ACC/AHA 2025: morphine or fentanyl).'
+      },
+      clinicalNote:
+        'Opioids (morphine/fentanyl) are reserved for ischemic pain ' +
+        'refractory to other therapy; they delay antiplatelet absorption ' +
+        'and can drop preload — caution in inferior/RV MI (ACC/AHA 2025).'
+    },
+    {
+      id: 'start-cpr',
+      label: 'Start high-quality chest compressions',
+      aliases: ['start compressions', 'start cpr', 'begin compressions',
+                'pump his chest', 'get on the chest', 'compressions now',
+                'hands on the chest'],
+      correct: true,
+      requiresRationale: false,
+      effect: {
+        onVitals:
+          'NOT definitive — CPR buys time, it does not convert VF. While ' +
+          'compressions run: modeled perfusion sbp ~70/dbp ~30, SpO2 decay ' +
+          'PAUSES and bumps +2%, and the engine\'s no-flow timer RESETS so ' +
+          'a later shock retains high success odds. Stopping compressions ' +
+          'resumes the untreated decay.',
+        definitive: false,
+        onsetSeconds: 5,
+        note: 'Rate 100-120/min, depth 5-6 cm (at least 2 in, not more than ' +
+              '2.4 in), full recoil, interruptions <10 s, compression ' +
+              'fraction >=60%, switch compressor every 2 min (AHA 2020). ' +
+              '30:2 with bag-mask until an advanced airway.'
+      },
+      clinicalNote:
+        'Immediate high-quality CPR is the foundation of VF survival: ' +
+        'compressions 100-120/min, 5-6 cm deep, full recoil, minimal ' +
+        'interruptions (AHA 2020 BLS).'
+    },
+    {
+      id: 'defibrillate',
+      label: 'Defibrillate — biphasic 120-200 J per manufacturer (max if unknown)',
+      aliases: ['shock him', 'charge the defib', 'defibrillate', 'deliver a shock',
+                'clear and shock', 'charge to two hundred', 'shock at max',
+                'all clear, shocking'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'DEFINITIVE for this scenario. Converts VF -> flips the engine to ' +
+          'the treated[] ROSC trajectory (clock re-anchored to the shock). ' +
+          'Success probability decays with accrued no-flow time — shock ' +
+          'delivered with a fresh no-flow timer (CPR running up to the ' +
+          'charge) converts on the first attempt; long no-flow may fire the ' +
+          'refractory-vf curveball. Resume compressions IMMEDIATELY after ' +
+          'the shock for 2 min before the rhythm check.',
+        definitive: true,
+        onsetSeconds: 15,
+        note: 'Biphasic: manufacturer\'s recommended energy (e.g. initial ' +
+              '120-200 J); if unknown, use MAXIMUM available. Monophasic: ' +
+              '360 J. Single shock then immediate CPR — no stacked shocks ' +
+              '(AHA 2020). ERC 2021: >=150 J biphasic acceptable.'
+      },
+      clinicalNote:
+        'VF is a shockable rhythm: rapid defibrillation is the definitive ' +
+        'treatment, and survival falls with every minute of delay — shock ' +
+        'as soon as the defibrillator is ready, then immediately resume ' +
+        'compressions (AHA 2020).'
+    },
+    {
+      id: 'epinephrine-iv-1mg',
+      label: 'Epinephrine 1 mg IV/IO, repeat every 3-5 minutes',
+      aliases: ['give epi', 'one of epi', 'epinephrine iv', 'push epi',
+                'epi one milligram', 'adrenaline one milligram', 'more epi'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'Correct ADJUNCT, not definitive — epinephrine does not convert ' +
+          'VF. Improves coronary perfusion pressure during CPR: engine ' +
+          'boosts shock-success odds and steepens the post-ROSC BP ' +
+          'recovery. Engine should reject a repeat dose <180 s after the ' +
+          'last (q3-5min dosing) and flag epi given BEFORE the second shock ' +
+          'in a shockable rhythm as out of sequence.',
+        definitive: false,
+        onsetSeconds: 60,
+        note: '1 mg IV/IO (10 mL of 0.1 mg/mL) every 3-5 min, followed by a ' +
+              '20 mL flush. For VF/pVT the AHA 2020 algorithm places the ' +
+              'first dose AFTER the second shock fails (ERC 2021: after the ' +
+              'third) — shocks and CPR always come first.'
+      },
+      clinicalNote:
+        'Epinephrine 1 mg IV/IO every 3-5 minutes in cardiac arrest; in ' +
+        'shockable rhythms it is given after defibrillation attempts have ' +
+        'failed, never in place of them (AHA 2020; ERC 2021).'
+    },
+    {
+      id: 'amiodarone-iv-300',
+      label: 'Amiodarone 300 mg IV bolus for shock-refractory VF',
+      aliases: ['give amiodarone', 'amio three hundred', 'amiodarone bolus',
+                'antiarrhythmic', 'lidocaine instead'],
+      correct: true,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'Adjunct for VF persisting after 3 shocks (the refractory-vf ' +
+          'curveball): raises the next shock\'s conversion odds. No effect ' +
+          'and flagged out-of-sequence if given before defibrillation has ' +
+          'been attempted at least 3 times.',
+        definitive: false,
+        onsetSeconds: 60,
+        note: 'First dose 300 mg IV/IO bolus after the 3rd shock; second ' +
+              'dose 150 mg. Alternative: lidocaine 1-1.5 mg/kg, then ' +
+              '0.5-0.75 mg/kg (AHA 2020; ERC 2021 same amiodarone doses).'
+      },
+      clinicalNote:
+        'Amiodarone (300 mg, then 150 mg) or lidocaine may be considered ' +
+        'for VF/pVT unresponsive to defibrillation — after shocks and ' +
+        'epinephrine, never before them (AHA 2020).'
+    },
+    // ------------------------------------------------ WRONG / HARMFUL SET
+    {
+      id: 'precordial-thump-only',
+      label: 'Precordial thump instead of defibrillation',
+      aliases: ['thump his chest', 'precordial thump', 'fist to the sternum',
+                'whack his chest'],
+      correct: false,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'VF continues unchanged; ~15 s of no-flow time accrues while the ' +
+          'defibrillator sits unused. Engine keeps the untreated decay ' +
+          'running and logs a Respond error.',
+        definitive: false,
+        onsetSeconds: 15,
+        note: 'With a defibrillator available, the thump is theatre. It ' +
+              'must never delay CPR or shock delivery.'
+      },
+      clinicalNote:
+        'The precordial thump has no role when a defibrillator is ' +
+        'available and must not delay CPR or defibrillation; it may be ' +
+        'considered only in witnessed, monitored unstable VT with no ' +
+        'defibrillator immediately ready (AHA guidance carried into 2020; ' +
+        'ERC 2021 similarly restricts it).'
+    },
+    {
+      id: 'nitro-when-hypotensive',
+      label: 'Give nitroglycerin despite hypotension / falling BP',
+      aliases: ['nitro anyway', 'another nitro', 'nitro despite the pressure',
+                'give nitro now his pressure is low'],
+      correct: false,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'Preload collapse in an RV-involved inferior STEMI: SBP falls ' +
+          '30-40 mmHg within 60 s, HR spikes, and the pre-arrest timeline ' +
+          'ACCELERATES by 30-45 s (engine shortens time-to-VF). If SBP is ' +
+          'already <80, triggers immediate arrest.',
+        definitive: false,
+        onsetSeconds: 30,
+        note: 'By 180 s his SBP (128) is already 30 mmHg below his 158 ' +
+              'baseline — the contraindication threshold has been crossed ' +
+              'even though 128 "looks fine".'
+      },
+      clinicalNote:
+        'Nitroglycerin is contraindicated with SBP <90 mmHg or >=30 mmHg ' +
+        'below baseline, and in RV infarction, where it can cause profound ' +
+        'hypotension (ACC/AHA 2013; ACC/AHA 2025).'
+    },
+    {
+      id: 'delay-defib-for-meds',
+      label: 'Hold the shock to draw up drugs first',
+      aliases: ['wait for the epi first', 'drugs before shocking', 'hold the shock',
+                'let\'s get the epi in before we shock', 'meds first then shock'],
+      correct: false,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'Every minute of VF without defibrillation sharply lowers the ' +
+          'odds of ROSC — the engine accrues no-flow time, decays the VF ' +
+          'from coarse toward fine, and raises the chance the eventual ' +
+          'shock fails (refractory-vf curveball). Drugs never convert VF.',
+        definitive: false,
+        onsetSeconds: 30,
+        note: 'Sequence for shockable rhythms: CPR -> shock ASAP -> CPR -> ' +
+              'shock -> THEN epinephrine -> shock -> then amiodarone. Drugs ' +
+              'slot into the gaps; they never gate the shock (AHA 2020).'
+      },
+      clinicalNote:
+        'In VF/pVT, defibrillation takes priority: shock as soon as the ' +
+        'defibrillator is ready, with drugs given during CPR between ' +
+        'shocks — delaying defibrillation for medications worsens survival ' +
+        '(AHA 2020; ERC 2021).'
+    },
+    {
+      id: 'stop-compressions-early',
+      label: 'Stop or repeatedly pause compressions before ROSC',
+      aliases: ['stop cpr', 'stop compressions', 'take a break from cpr',
+                'hold compressions to check', 'everyone stop for a second'],
+      correct: false,
+      requiresRationale: true,
+      effect: {
+        onVitals:
+          'Coronary perfusion pressure collapses within seconds of any ' +
+          'pause and takes many compressions to rebuild: the SpO2 decay ' +
+          'resumes, the no-flow timer restarts, and shock success drops. ' +
+          'Pauses >10 s or stopping before ROSC/handover logs a Respond ' +
+          'error; repeated offenses trip the hard fail.',
+        definitive: false,
+        onsetSeconds: 5,
+        note: 'Legitimate pauses only: rhythm check (<10 s), shock ' +
+              'delivery, compressor switch every 2 min. Pulse checks happen ' +
+              'AT rhythm checks, not ad hoc.'
+      },
+      clinicalNote:
+        'Minimize interruptions in compressions — keep pauses under 10 ' +
+        'seconds and the chest-compression fraction as high as possible ' +
+        '(target >=60%); interruptions directly reduce survival ' +
+        '(AHA 2020 BLS).'
+    }
+  ],
+
+  // ------------------------------------------------------------ CURVEBALLS
+  curveballPool: [
+    {
+      id: 'rv-preload-crash',
+      trigger:
+        'Fires if nitroglycerin is given before right-sided leads (V4R) ' +
+        'have been checked, even inside the "safe" BP window.',
+      description:
+        'The undetected RV infarct declares itself: SBP drops to the low ' +
+        '80s within 60 s of the dose, patient becomes grey and pre-syncopal.',
+      effect:
+        'Trainee must lie the patient flat, hold further nitrates, and ' +
+        'verbalize the RV-infarction/preload lesson; SBP recovers ~15 mmHg ' +
+        'over 90 s once nitrates are withheld. Teaches: obtain V4R in every ' +
+        'inferior STEMI before nitrates (ACC/AHA 2013; ACC/AHA 2025).'
+    },
+    {
+      id: 'refractory-vf',
+      trigger:
+        'Fires when the first shock is delivered with >120 s of accrued ' +
+        'no-flow time (late/absent CPR) — or at random on harder settings.',
+      description:
+        'The first shock fails: VF persists at the post-shock rhythm ' +
+        'check. The trainee must resume compressions immediately, escalate ' +
+        'energy (or confirm max), give epinephrine 1 mg after the second ' +
+        'failed shock, and add amiodarone 300 mg after the third.',
+      effect:
+        'Conversion succeeds on shock 2 or 3 IF the full ACLS loop runs ' +
+        '(CPR quality maintained, epi after 2nd shock, amiodarone after ' +
+        '3rd). Teaches the drug-shock sequencing of the AHA 2020 shockable ' +
+        'algorithm.'
+    },
+    {
+      id: 'sync-button-trap',
+      trigger:
+        'Fires at the first defibrillation attempt: a flustered colleague ' +
+        'has left the defibrillator in SYNC mode and asks "it\'s set to ' +
+        'sync — fire?"',
+      description:
+        'A synchronized shock will not fire on VF (no R wave to sync to). ' +
+        'The trainee must recognize the mode error, switch to ' +
+        'unsynchronized defibrillation, and deliver the shock.',
+      effect:
+        'Catching it costs nothing; missing it wastes ~20 s of no-flow ' +
+        'time while the machine hunts for an R wave. Teaches: ' +
+        'defibrillation (unsynchronized) for VF/pVT; synchronized ' +
+        'cardioversion is for perfusing tachyarrhythmias (AHA 2020).'
+    },
+    {
+      id: 'recurrent-vf-post-rosc',
+      trigger:
+        'Fires 90-150 s after ROSC (higher probability if amiodarone was ' +
+        'never given and the cath lab has not been activated).',
+      description:
+        'The still-ischemic inferior wall refibrillates: patient slumps ' +
+        'again, monitor shows recurrent VF.',
+      effect:
+        'Immediate CPR + repeat defibrillation converts it (pads were ' +
+        'never removed — credit if the trainee verbalized keeping pads ' +
+        'on). Reinforces that post-ROSC STEMI patients remain electrically ' +
+        'unstable until reperfused — the cath lab is the cure ' +
+        '(ACC/AHA 2025; AHA 2020 post-ROSC care).'
+    }
+  ],
+
+  // --------------------------------------------------------------- SCORING
+  // Tanner's Clinical Judgment Model framing: Notice / Interpret / Respond.
+  scoringRubric: {
+    // Targets measured on the sim clock. Arrest (VF) is scripted at ~200 s:
+    //  - CPR within 15 s of collapse (AHA 2020: immediate CPR).
+    //  - Shock within 60 s of VF onset — in-hospital witnessed monitored
+    //    arrest with a crash cart nearby should be shocked in well under
+    //    2-3 minutes (AHA 2020: survival falls with each minute of delay).
+    //  - Aspirin + 12-lead inside phase 1 (ECG <=10 min of contact is the
+    //    guideline ceiling; this sim expects it far faster).
+    timeToEcgTargetSeconds: 120,
+    timeToAspirinTargetSeconds: 150,
+    timeToCprTargetSeconds: 215,            // collapse 200 s + 15 s
+    timeToDefibrillationTargetSeconds: 260, // collapse 200 s + 60 s
+    criteria: [
+      { id: 'notice-acs-cluster',
+        dimension: 'notice',
+        descriptor: 'Identifies the ACS cluster — crushing substernal pressure with radiation to arm/jaw, diaphoresis, nausea, grey pallor — as cardiac within the first 60 s, in a post-op patient whose aspirin was held.',
+        points: 8 },
+      { id: 'notice-ectopy-warning',
+        dimension: 'notice',
+        descriptor: 'Notices the escalating ventricular ectopy (PVCs, couplets, run of VT) on the monitor as a warning of electrical instability, and the collapse itself within 10 s.',
+        points: 8 },
+      { id: 'notice-bp-trend',
+        dimension: 'notice',
+        descriptor: 'Tracks the BP TREND (164 -> 128, a fall of 30+ mmHg from baseline) rather than the snapshot, and recognizes what that does to the nitrate window.',
+        points: 6 },
+      { id: 'interpret-stemi',
+        dimension: 'interpret',
+        descriptor: 'Reads the 12-lead as an inferior STEMI (ST elevation II, III, aVF with reciprocal changes), requests right-sided V4R, and states the reperfusion/cath-lab imperative (ACC/AHA 2025).',
+        points: 10 },
+      { id: 'interpret-vf-shockable',
+        dimension: 'interpret',
+        descriptor: 'Names the arrest rhythm as ventricular fibrillation, classifies it as SHOCKABLE, and states that it needs immediate defibrillation — not drugs first (AHA 2020).',
+        points: 10 },
+      { id: 'interpret-rationale',
+        dimension: 'interpret',
+        descriptor: 'When prompted for rationale, explains WHY: aspirin limits thrombus propagation; nitrates are dangerous with RV involvement/falling BP; early defibrillation beats everything because shock success decays by the minute.',
+        points: 8 },
+      { id: 'respond-phase1-bundle',
+        dimension: 'respond',
+        descriptor: 'Delivers the phase-1 ACS bundle: 12-lead within 120 s, chewed aspirin 162-325 mg, rapid-response/cath-lab activation, oxygen withheld while SpO2 >=90 (or given only if <90).',
+        points: 12 },
+      { id: 'respond-cpr-quality',
+        dimension: 'respond',
+        descriptor: 'Starts compressions within 15 s of collapse and verbalizes quality targets: 100-120/min, 5-6 cm depth, full recoil, pauses <10 s, compressor switch every 2 min (AHA 2020).',
+        points: 14 },
+      { id: 'respond-defib-fast',
+        dimension: 'respond',
+        descriptor: 'Delivers an unsynchronized shock within 60 s of VF onset at the correct energy (biphasic 120-200 J per manufacturer, max if unknown; monophasic 360 J), clears the bed safely, and resumes compressions immediately after the shock.',
+        points: 16 },
+      { id: 'respond-acls-cycle',
+        dimension: 'respond',
+        descriptor: 'Runs the ACLS loop correctly: 2-minute CPR cycles with rhythm checks, epinephrine 1 mg IV q3-5min starting after the 2nd shock, amiodarone 300 mg after the 3rd, and post-ROSC care (O2 titrated to 92-98%, BP supported, repeat 12-lead, cath lab, pads stay on).',
+        points: 8 }
+    ],
+    hardFails: [
+      'No chest compressions started within 60 s of the collapse (AHA 2020: immediate CPR).',
+      'Defibrillation delayed more than 120 s after VF onset with the defibrillator available — or never delivered (patient reaches asystole at 500 s).',
+      'Gave nitroglycerin with SBP <90 mmHg or >=30 mmHg below baseline, or after RV involvement was demonstrated on V4R (ACC/AHA 2013/2025 contraindications).',
+      'Held the shock to give drugs first — epinephrine or amiodarone prioritized over defibrillation in a shockable rhythm (AHA 2020).',
+      'Stopped compressions before ROSC, or accumulated repeated pauses >10 s without a rhythm-check/shock/switch reason (AHA 2020 BLS).',
+      'Used a precordial thump in place of available defibrillation.',
+      'Never gave (or never attempted to give) aspirin at any point despite a recognized ACS with no contraindication.'
+    ]
+  },
+
+  // ------------------------------------------------------------ TOUCH ZONES
+  // New interaction layer: each zone is a tappable/grabbable region on the
+  // patient model. Every action maps to a real intervention id above, or to
+  // an 'assess-*' key the engine answers from CURRENT vitals (e.g.
+  // assess-pulse -> "no radial pulse" when sbp < ~80, "weak and thready"
+  // 80-95, "strong and regular" above; assess-rhythm reads the scripted
+  // rhythm for the current keyframe: sinus tach -> ectopy -> VF -> ROSC).
+  touchZones: [
+    {
+      id: 'chest',
+      label: 'Chest',
+      actions: [
+        { id: 'chest-auscultate', label: 'Auscultate heart and lungs', mapsTo: 'assess-heart-lungs' },
+        { id: 'chest-pain-probe', label: 'Ask about / palpate the chest pain', mapsTo: 'assess-pain' },
+        { id: 'chest-ecg',        label: 'Acquire 12-lead ECG',          mapsTo: 'ecg-12-lead' },
+        { id: 'chest-rhythm',     label: 'Check rhythm on pads/monitor', mapsTo: 'assess-rhythm' },
+        { id: 'chest-cpr',        label: 'Start chest compressions',     mapsTo: 'start-cpr' },
+        { id: 'chest-defib',      label: 'Apply pads, charge and shock', mapsTo: 'defibrillate' }
+      ]
+    },
+    {
+      id: 'wrist',
+      label: 'Wrist / hand',
+      actions: [
+        { id: 'wrist-pulse',      label: 'Check radial pulse',           mapsTo: 'assess-pulse' },
+        { id: 'wrist-cap-refill', label: 'Check capillary refill',       mapsTo: 'assess-perfusion' }
+      ]
+    },
+    {
+      id: 'head',
+      label: 'Head / face',
+      actions: [
+        { id: 'head-talk',    label: 'Talk to patient / check responsiveness', mapsTo: 'assess-responsiveness' },
+        { id: 'head-airway',  label: 'Open airway, look-listen-feel',          mapsTo: 'assess-airway' },
+        { id: 'head-carotid', label: 'Check carotid pulse',                    mapsTo: 'assess-pulse' },
+        { id: 'head-oxygen',  label: 'Apply titrated oxygen',                  mapsTo: 'oxygen-titrated' },
+        { id: 'head-aspirin', label: 'Give chewable aspirin',                  mapsTo: 'aspirin' },
+        { id: 'head-nitro',   label: 'Give sublingual nitroglycerin',          mapsTo: 'nitroglycerin' }
+      ]
+    },
+    {
+      id: 'arm',
+      label: 'Arm (IV side)',
+      actions: [
+        { id: 'arm-bp',    label: 'Cycle the BP cuff',                  mapsTo: 'assess-bp' },
+        { id: 'arm-epi',   label: 'Push epinephrine 1 mg IV',           mapsTo: 'epinephrine-iv-1mg' },
+        { id: 'arm-amio',  label: 'Give amiodarone 300 mg IV',          mapsTo: 'amiodarone-iv-300' },
+        { id: 'arm-morph', label: 'Give IV morphine for pain',          mapsTo: 'morphine-iv' }
+      ]
+    },
+    {
+      id: 'legs',
+      label: 'Legs',
+      actions: [
+        { id: 'legs-edema',    label: 'Check for peripheral edema',     mapsTo: 'assess-edema' },
+        { id: 'legs-mottling', label: 'Check skin mottling/perfusion',  mapsTo: 'assess-perfusion' }
+      ]
+    }
+  ],
+
+  // ---------------------------------------------------------- DOCTOR NUDGES
+  // Socratic voice lines for the AI Doctor. Intensity ladder:
+  //   1 = observation only, 2 = directed question, 3 = strong hint —
+  //   never the order itself. onEvent entries fire on the named engine
+  //   event and play in listed order if the situation persists.
+  doctorNudges: [
+    { atSeconds: 20,  intensity: 1,
+      text: 'He\'s grey, he\'s soaked through the gown, and he\'s holding a fist to his sternum. What\'s your read on this?' },
+    { atSeconds: 70,  intensity: 2,
+      text: 'Day one post-op, diabetic, ex-smoker, crushing chest pressure. What\'s the one bedside test that sorts this out in the next few minutes?' },
+    { atSeconds: 110, intensity: 2,
+      text: 'If this is his heart — is there a tablet you want in his mouth right now? Think about what got held for surgery.' },
+    { atSeconds: 150, intensity: 3,
+      text: 'ST elevation in two, three and aVF. Before anyone reaches for the nitro spray — which extra lead do you want, and what\'s his pressure doing compared to baseline?' },
+    { atSeconds: 185, intensity: 1,
+      text: 'Watch that monitor. Those runs of ectopy are the ventricle telling you it\'s irritable.' },
+    { onEvent: 'arrest', intensity: 2,
+      text: 'He\'s down. Look at the monitor — what rhythm is that, and what does that rhythm need?' },
+    { onEvent: 'arrest', intensity: 3,
+      text: 'That\'s a shockable rhythm and there\'s a defibrillator ten feet away. What happens to his odds with every minute that thing stays on the cart? And what are your hands doing in the meantime?' },
+    { onEvent: 'cpr-started', intensity: 1,
+      text: 'Good — stay over the chest. Hundred to one-twenty a minute, five to six centimetres, let it recoil. Nobody stops unless the rhythm check says so.' },
+    { onEvent: 'shock-delivered', intensity: 2,
+      text: 'Shock\'s in. What goes back on the chest right now, and for how long before you look at the monitor again?' },
+    { onEvent: 'refractory-vf', intensity: 3,
+      text: 'Two shocks and he\'s still fibrillating. Is there a drug this algorithm has been waiting for — and how often does it repeat?' },
+    { onEvent: 'post-rosc', intensity: 2,
+      text: 'We\'ve got a pulse. What number are you titrating his oxygen to — and where does a post-arrest STEMI need to be in the next thirty minutes?' }
+  ],
+
+  // ------------------------------------------------------------ HEART STATES
+  // Mapping for the live 3D heart visual. rate = organized beats/min shown
+  // by the model (0 = no organized contraction); contractility 0-1 scales
+  // wall-motion amplitude; color is a render hint; values are clinically
+  // sensible, not literal hemodynamics.
+  heartStates: [
+    { when: 'baseline',
+      rate: 104, contractility: 0.75, color: '#c0392b',
+      note: 'Sinus tachycardia of early ischemia — vigorous anterior/lateral walls, inferior wall already subtly hypokinetic and duskier.' },
+    { when: 'ischemia',
+      rate: 120, contractility: 0.55, color: '#8e5a9e',
+      note: 'Progressing inferior/RV ischemia: inferior wall hypokinetic and violaceous, visible ectopic twitches (PVCs) interrupting the rhythm.' },
+    { when: 'vf',
+      rate: 0, contractility: 0.05, color: '#5a6b8c',
+      note: 'Ventricular fibrillation: no organized beat — render a fine chaotic quiver ("bag of worms", fibrillatory activity ~300-500/min), dusky blue-grey, zero ejection.' },
+    { when: 'cpr',
+      rate: 0, contractility: 0.10, color: '#6c7a94',
+      note: 'Still in VF beneath compressions: quiver continues, but rhythmic external squeeze at 100-120/min (AHA 2020 rate) produces visible forward flow pulses.' },
+    { when: 'rosc',
+      rate: 112, contractility: 0.50, color: '#b3543f',
+      note: 'Post-shock ROSC: organized sinus beats return, initially fast and weak (post-arrest stunning), pinking up over ~2 min; inferior wall stays hypokinetic until reperfused.' },
+    { when: 'asystole',
+      rate: 0, contractility: 0.0, color: '#4a4f57',
+      note: 'Terminal state if never resuscitated: no electrical or mechanical activity — still, grey, no quiver.' }
+  ]
+};
+
+// UMD-style tail: browser global + Node export.
+if (typeof window !== 'undefined') {
+  
+// Engine gate (see patient-loop arrest-only check): indicated only in arrest.
+MI_SCENARIO.arrestOnlyInterventions = ['defibrillate', 'epinephrine-iv-1mg', 'amiodarone-iv-300', 'start-cpr'];
+MI_SCENARIO.prematureInterventionNote = 'He still has a pulse and a perfusing rhythm — that is not indicated right now and could cause harm. What does this rhythm actually need?';
+
+window.MI_SCENARIO = MI_SCENARIO;
+} else if (typeof module !== 'undefined' && module.exports) {
+  module.exports = MI_SCENARIO;
+}
+
+</script>
+<script>
+/* =====================================================================
+   patient-interact.js — touchable patient + intervention props for the
+   nurse VR sim.
+   ---------------------------------------------------------------------
+   Gives the bed-bound patient physical interactivity:
+     1) Invisible-ish holo hitboxes over body regions (chest, head/face,
+        left wrist/hand, right arm, legs). They glimmer faintly (cyan
+        shell ~0.06 opacity) and brighten on hover so players discover
+        touchability. Selecting one pops a context menu through the
+        EXISTING window.makeVRUI panel system (vrui.showPanel).
+     2) Visible intervention props: defib pads + shock flash/jolt, CPR
+        compression hands, oxygen mask, ECG leads.
+
+   Target: Three.js r160 UMD global THREE. Matches host conventions:
+   cyan 0x00e5ff hologram aesthetic; patient supine in a wrapper Group,
+   bed centerline x=-0.4, mattress top y~0.66, head z~-2.28, feet
+   z~-0.58; desktop picks arrive as pi.pick(raycaster)/pi.hover(raycaster)
+   forwarded by the host (pointer events + VR controller selectstart).
+
+   Usage:
+     var pi = window.makePatientInteract(THREE, scene, {
+       renderer, camera, rig, vrui,          // makeVRUI instance
+       zones: scenario.touchZones,           // [{id,label,actions:[{id,label,mapsTo}]}]
+       onAction: function(actionId, zoneId, label){...},
+       patientRef: { center:{x,y,z} }        // chest centre for prop placement
+     });
+     pi.buildZones();
+     pi.pick(raycaster);   // -> true if a zone consumed the click
+     pi.hover(raycaster);
+     pi.showDefibPads(); pi.shock().then(...);
+     pi.startCPR(); pi.stopCPR(); pi.setChestNode(node);
+     pi.showOxygenMask(); pi.hideOxygenMask(); pi.showECGLeads();
+     pi.update(dt);        // host-driven — no rAF of its own
+     pi.setEnabled(bool); pi.dispose();
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  window.makePatientInteract = function (THREE, scene, opts) {
+    opts = opts || {};
+    var vrui       = opts.vrui || null;
+    var zoneDefs   = opts.zones || [];
+    var onAction   = (typeof opts.onAction === 'function') ? opts.onAction
+                                                           : function () {};
+    var patientRef = opts.patientRef || {};
+    var C = patientRef.center || { x: -0.4, y: 0.78, z: -1.55 }; // chest centre
+    var patientNode = patientRef.node || null;   // optional wrapper for jolts
+
+    /* ---------------- tunables ---------------- */
+    var CYAN         = 0x00e5ff;
+    var BX           = C.x;          // bed centreline x
+    var FILL_BASE    = 0.06, FILL_HOVER = 0.25;
+    var EDGE_BASE    = 0.14, EDGE_HOVER = 0.60;
+    var HOVER_K      = 12;           // opacity lerp stiffness
+    var CPR_DEPTH    = 0.048;        // hands travel ~4-5 cm
+    var CPR_CHEST    = 0.022;        // chest node depression
+    var SHOCK_DUR    = 0.25;         // seconds
+    var SHOCK_LIFT   = 0.03;         // body jolt 3 cm
+
+    /* ---------------- shared state ---------------- */
+    var root = new THREE.Group();
+    root.name = 'patient-interact-root';
+    scene.add(root);
+
+    var disposables = [];
+    var disposed = false;
+    var enabled  = true;
+
+    function track(r) { disposables.push(r); return r; }
+
+    /* Canonical body regions along the supine body (head -z, feet +z).
+       Boxes hug the mattress top (~0.66) up over the body surface. */
+    var REGIONS = {
+      chest:     { pos: [BX,        0.745, -1.75], size: [0.42, 0.17, 0.42] },
+      head:      { pos: [BX,        0.765, -2.15], size: [0.28, 0.21, 0.30] },
+      leftWrist: { pos: [BX + 0.28, 0.705, -1.35], size: [0.18, 0.11, 0.32] },
+      rightArm:  { pos: [BX - 0.28, 0.710, -1.60], size: [0.18, 0.11, 0.55] },
+      legs:      { pos: [BX,        0.720, -0.95], size: [0.44, 0.15, 0.62] }
+    };
+    var REGION_ORDER = ['chest', 'head', 'leftWrist', 'rightArm', 'legs'];
+
+    function matchRegion(zone, taken) {
+      var s = (String(zone.id || '') + ' ' + String(zone.label || ''))
+                .toLowerCase();
+      var key = null;
+      if (/chest|torso|sternum|cardiac|heart|lung/.test(s))      key = 'chest';
+      else if (/head|face|airway|mouth|neuro|pupil/.test(s))     key = 'head';
+      else if (/left.*(wrist|hand|arm)|wrist|hand|pulse|iv/.test(s))
+                                                                 key = 'leftWrist';
+      else if (/right.*arm|arm|cuff|bp|blood.?pressure/.test(s)) key = 'rightArm';
+      else if (/leg|feet|foot|lower|calf|thigh|edema/.test(s))   key = 'legs';
+      if (key && !taken[key]) return key;
+      for (var i = 0; i < REGION_ORDER.length; i++) {
+        if (!taken[REGION_ORDER[i]]) return REGION_ORDER[i];
+      }
+      return 'chest';
+    }
+
+    /* =====================================================
+       Touch zones — barely-visible holo shells
+       ===================================================== */
+    var zones = [];          // {def, group, fill, edges, hover, opF, opE}
+    var zoneMeshes = [];     // raycast targets (fill meshes)
+    var hoveredZone = null;
+    var openPanelId = null;
+
+    function buildZones() {
+      if (disposed || zones.length) return;   // idempotent
+      var taken = {};
+      for (var i = 0; i < zoneDefs.length; i++) {
+        var def = zoneDefs[i];
+        var key = matchRegion(def, taken);
+        taken[key] = true;
+        var R = REGIONS[key];
+
+        var geo = track(new THREE.BoxGeometry(R.size[0], R.size[1], R.size[2]));
+        var fillMat = track(new THREE.MeshBasicMaterial({
+          color: CYAN, transparent: true, opacity: FILL_BASE,
+          depthWrite: false, fog: false
+        }));
+        var fill = new THREE.Mesh(geo, fillMat);
+        fill.renderOrder = 5;
+
+        var edgeGeo = track(new THREE.EdgesGeometry(geo));
+        var edgeMat = track(new THREE.LineBasicMaterial({
+          color: CYAN, transparent: true, opacity: EDGE_BASE, fog: false
+        }));
+        var edges = new THREE.LineSegments(edgeGeo, edgeMat);
+        edges.raycast = function () {};   // only the fill takes rays
+        edges.renderOrder = 6;
+
+        var group = new THREE.Group();
+        group.position.set(R.pos[0], R.pos[1], R.pos[2]);
+        group.add(fill); group.add(edges);
+        root.add(group);
+
+        var rec = { def: def, group: group, fill: fill, edges: edges,
+                    hover: false, opF: FILL_BASE, opE: EDGE_BASE };
+        fill.userData.piZone = rec;
+        zones.push(rec);
+        zoneMeshes.push(fill);
+      }
+    }
+
+    function raycastZone(raycaster) {
+      if (!zoneMeshes.length) return null;
+      var hits = raycaster.intersectObjects(zoneMeshes, false);
+      return hits.length ? hits[0].object.userData.piZone : null;
+    }
+
+    function openZoneMenu(rec) {
+      if (!vrui) return;
+      var def = rec.def;
+      var pid = 'zone-' + def.id;
+      if (openPanelId && openPanelId !== pid) vrui.hidePanel(openPanelId);
+      var buttons = (def.actions || []).map(function (a) {
+        return {
+          label: a.label,
+          onSelect: function () {
+            onAction(a.id, def.id, a.label);
+            vrui.hidePanel(pid);
+            if (openPanelId === pid) openPanelId = null;
+          }
+        };
+      });
+      buttons.push({
+        label: 'Close',
+        onSelect: function () {
+          vrui.hidePanel(pid);
+          if (openPanelId === pid) openPanelId = null;
+        }
+      });
+      vrui.showPanel(pid, { title: def.label, buttons: buttons });
+      openPanelId = pid;
+    }
+
+    /* pick(raycaster) -> true if a zone consumed the click */
+    function pick(raycaster) {
+      if (disposed || !enabled) return false;
+      var rec = raycastZone(raycaster);
+      if (!rec) return false;
+      openZoneMenu(rec);
+      return true;
+    }
+
+    function hover(raycaster) {
+      if (disposed || !enabled) return false;
+      var rec = raycastZone(raycaster);
+      if (hoveredZone && hoveredZone !== rec) hoveredZone.hover = false;
+      hoveredZone = rec;
+      if (rec) rec.hover = true;
+      return !!rec;
+    }
+
+    /* =====================================================
+       Shared prop helpers
+       ===================================================== */
+    var glowTex = null;
+    function getGlowTexture() {
+      if (glowTex) return glowTex;
+      var c = document.createElement('canvas');
+      c.width = c.height = 128;
+      var g = c.getContext('2d');
+      var grad = g.createRadialGradient(64, 64, 4, 64, 64, 64);
+      grad.addColorStop(0.0, 'rgba(255,255,255,0.9)');
+      grad.addColorStop(0.5, 'rgba(255,255,255,0.25)');
+      grad.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 128, 128);
+      glowTex = track(new THREE.CanvasTexture(c));
+      glowTex.colorSpace = THREE.SRGBColorSpace;
+      return glowTex;
+    }
+
+    function makeGlowSprite(color, scale, opacity) {
+      var mat = track(new THREE.SpriteMaterial({
+        map: getGlowTexture(), color: color, transparent: true,
+        opacity: opacity, blending: THREE.AdditiveBlending,
+        depthWrite: false, fog: false
+      }));
+      var spr = new THREE.Sprite(mat);
+      spr.scale.set(scale, scale, 1);
+      spr.raycast = function () {};
+      return spr;
+    }
+
+    /* =====================================================
+       Defib pads + shock
+       ===================================================== */
+    var padsGroup = null, padGlows = [], padGlowBase = 0.35;
+
+    function makePad(x, y, z, rotY) {
+      var g = new THREE.Group();
+      var geo = track(new THREE.BoxGeometry(0.11, 0.016, 0.15));
+      var mat = track(new THREE.MeshBasicMaterial({
+        color: 0xffb300, fog: false
+      }));
+      var body = new THREE.Mesh(geo, mat);
+      body.raycast = function () {};
+      g.add(body);
+      var rim = new THREE.LineSegments(
+        track(new THREE.EdgesGeometry(geo)),
+        track(new THREE.LineBasicMaterial({ color: 0xff8f00, fog: false })));
+      rim.raycast = function () {};
+      g.add(rim);
+      var glow = makeGlowSprite(0xffb300, 0.22, padGlowBase);
+      glow.position.y = 0.02;
+      g.add(glow);
+      padGlows.push(glow);
+      g.position.set(x, y, z);
+      g.rotation.y = rotY;
+      return g;
+    }
+
+    function showDefibPads() {
+      if (disposed) return;
+      if (padsGroup) { padsGroup.visible = true; return; }   // idempotent
+      padsGroup = new THREE.Group();
+      padsGroup.name = 'defib-pads';
+      // sternal pad: patient's right upper chest (-x, toward head -z)
+      padsGroup.add(makePad(C.x - 0.11, C.y + 0.012, C.z - 0.13,  0.35));
+      // apex pad: patient's left lower chest (+x, toward feet +z)
+      padsGroup.add(makePad(C.x + 0.13, C.y + 0.006, C.z + 0.11, -0.45));
+      root.add(padsGroup);
+    }
+
+    function hideDefibPads() {
+      if (padsGroup) padsGroup.visible = false;
+    }
+
+    /* one-shot shock: jolt + white flash + pad glow spike */
+    var shockAnim = null;         // {t, resolve, baseY(patientNode)}
+    var flashSprite = null;
+
+    function shock() {
+      if (disposed) return Promise.resolve();
+      if (shockAnim) return shockAnim.promise;   // already firing
+      if (!flashSprite) {
+        flashSprite = makeGlowSprite(0xffffff, 0.9, 0);
+        flashSprite.position.set(C.x, C.y + 0.12, C.z);
+        root.add(flashSprite);
+      }
+      var joltNode = patientNode || null;
+      var rec = {
+        t: 0, joltNode: joltNode,
+        baseY: joltNode ? joltNode.position.y : 0
+      };
+      rec.promise = new Promise(function (resolve) { rec.resolve = resolve; });
+      flashSprite.visible = true;
+      shockAnim = rec;
+      return rec.promise;
+    }
+
+    function stepShock(dt) {
+      if (!shockAnim) return;
+      shockAnim.t += dt;
+      var k = Math.min(shockAnim.t / SHOCK_DUR, 1);
+      var off = SHOCK_LIFT * Math.sin(Math.PI * k);   // lift + settle
+      if (shockAnim.joltNode) {
+        shockAnim.joltNode.position.y = shockAnim.baseY + off;
+      }
+      shockOffset = off;                                // picked up by chest pose
+      if (padsGroup) padsGroup.position.y = off;
+      if (flashSprite) flashSprite.material.opacity = 0.95 * (1 - k);
+      for (var i = 0; i < padGlows.length; i++) {
+        padGlows[i].material.opacity = padGlowBase + 0.9 * (1 - k);
+      }
+      if (k >= 1) {
+        if (shockAnim.joltNode) shockAnim.joltNode.position.y = shockAnim.baseY;
+        shockOffset = 0;
+        if (padsGroup) padsGroup.position.y = 0;
+        if (flashSprite) { flashSprite.visible = false;
+                           flashSprite.material.opacity = 0; }
+        for (i = 0; i < padGlows.length; i++) {
+          padGlows[i].material.opacity = padGlowBase;
+        }
+        var res = shockAnim.resolve;
+        shockAnim = null;
+        res();
+      }
+    }
+
+    /* =====================================================
+       CPR — looped chest compressions
+       ===================================================== */
+    var handsGroup = null, cprActive = false, cprRate = 1.83, cprPhase = 0;
+    var handBaseY = C.y + 0.055;
+    var chestNode = null, chestBaseY = 0, chestDirty = false;
+    var shockOffset = 0;
+
+    function setChestNode(node) {
+      if (chestNode && chestNode !== node) chestNode.position.y = chestBaseY;
+      chestNode = node || null;
+      if (chestNode) chestBaseY = chestNode.position.y;
+    }
+
+    function buildHands() {
+      handsGroup = new THREE.Group();
+      handsGroup.name = 'cpr-hands';
+      var mat = track(new THREE.MeshBasicMaterial({
+        color: 0x9adcff, transparent: true, opacity: 0.85, fog: false
+      }));
+      var gBot = track(new THREE.BoxGeometry(0.09, 0.045, 0.17));
+      var bottom = new THREE.Mesh(gBot, mat);
+      bottom.raycast = function () {};
+      handsGroup.add(bottom);
+      var gTop = track(new THREE.BoxGeometry(0.08, 0.045, 0.15));
+      var top = new THREE.Mesh(gTop, mat);
+      top.position.y = 0.045;
+      top.rotation.y = 0.35;                       // interlocked hands
+      top.raycast = function () {};
+      handsGroup.add(top);
+      var edges = new THREE.LineSegments(
+        track(new THREE.EdgesGeometry(gBot)),
+        track(new THREE.LineBasicMaterial({
+          color: CYAN, transparent: true, opacity: 0.7, fog: false })));
+      edges.raycast = function () {};
+      handsGroup.add(edges);
+      handsGroup.position.set(C.x, handBaseY, C.z);
+      root.add(handsGroup);
+    }
+
+    function startCPR(rateHz) {
+      if (disposed) return;
+      if (typeof rateHz === 'number' && rateHz > 0) cprRate = rateHz;
+      if (!handsGroup) buildHands();               // idempotent
+      handsGroup.visible = true;
+      if (!cprActive) { cprActive = true; cprPhase = 0; }
+    }
+
+    function stopCPR() {
+      cprActive = false;
+      if (handsGroup) handsGroup.visible = false;
+      if (chestNode && shockOffset === 0) {
+        chestNode.position.y = chestBaseY;
+        chestDirty = false;
+      }
+    }
+
+    /* returns compression press 0..1 (0 when CPR inactive) */
+    function stepCPR(dt) {
+      if (!cprActive || !handsGroup) return 0;
+      cprPhase += dt * cprRate * Math.PI * 2;
+      var press = 0.5 * (1 - Math.cos(cprPhase));          // 0..1
+      handsGroup.position.y = handBaseY - press * CPR_DEPTH;
+      return press;
+    }
+
+    /* only touch the chest node while CPR/shock owns it, so a host
+       breathing animation on the same node is never fought at rest */
+    function applyChestPose(press) {
+      if (!chestNode) return;
+      if (cprActive || shockOffset !== 0) {
+        chestNode.position.y = chestBaseY - press * CPR_CHEST + shockOffset;
+        chestDirty = true;
+      } else if (chestDirty) {
+        chestNode.position.y = chestBaseY;
+        chestDirty = false;
+      }
+    }
+
+    /* =====================================================
+       Oxygen mask — translucent cup + strap over the face
+       ===================================================== */
+    var maskGroup = null;
+    var FACE = { x: BX, y: 0.795, z: -2.14 };   // supine face, looking up
+
+    function showOxygenMask() {
+      if (disposed) return;
+      if (maskGroup) { maskGroup.visible = true; return; }   // idempotent
+      maskGroup = new THREE.Group();
+      maskGroup.name = 'oxygen-mask';
+      // translucent cup (hemisphere cap opening down onto the face)
+      var cupGeo = track(new THREE.SphereGeometry(
+        0.075, 24, 16, 0, Math.PI * 2, 0, 1.15));
+      var cupMat = track(new THREE.MeshBasicMaterial({
+        color: 0xbfefff, transparent: true, opacity: 0.30,
+        side: THREE.DoubleSide, depthWrite: false, fog: false
+      }));
+      var cup = new THREE.Mesh(cupGeo, cupMat);
+      cup.position.set(FACE.x, FACE.y - 0.02, FACE.z);
+      cup.raycast = function () {};
+      maskGroup.add(cup);
+      var rim = new THREE.Mesh(
+        track(new THREE.TorusGeometry(0.062, 0.006, 8, 28)),
+        track(new THREE.MeshBasicMaterial({
+          color: 0xdff8ff, transparent: true, opacity: 0.55, fog: false })));
+      rim.position.set(FACE.x, FACE.y - 0.018, FACE.z);
+      rim.rotation.x = Math.PI / 2;
+      rim.raycast = function () {};
+      maskGroup.add(rim);
+      // elastic strap around the head (ring in the XY plane, axis = z)
+      var strap = new THREE.Mesh(
+        track(new THREE.TorusGeometry(0.105, 0.007, 8, 32)),
+        track(new THREE.MeshBasicMaterial({ color: 0x2a3f46, fog: false })));
+      strap.position.set(FACE.x, FACE.y - 0.065, FACE.z - 0.02);
+      strap.raycast = function () {};
+      maskGroup.add(strap);
+      root.add(maskGroup);
+    }
+
+    function hideOxygenMask() {
+      if (maskGroup) maskGroup.visible = false;
+    }
+
+    /* =====================================================
+       ECG leads — three thin dark leads chest -> bedside
+       ===================================================== */
+    var ecgGroup = null;
+
+    function showECGLeads() {
+      if (disposed) return;
+      if (ecgGroup) { ecgGroup.visible = true; return; }     // idempotent
+      ecgGroup = new THREE.Group();
+      ecgGroup.name = 'ecg-leads';
+      var elecMat = track(new THREE.MeshBasicMaterial({
+        color: 0xe8f6ff, fog: false }));
+      var leadMat = track(new THREE.MeshBasicMaterial({
+        color: 0x15262e, fog: false }));
+      var elecGeo = track(new THREE.CylinderGeometry(0.016, 0.016, 0.008, 12));
+      // RA (patient right = -x, upper), LA (+x, upper), LL (+x, lower)
+      var pts = [
+        [C.x - 0.12, C.y + 0.012, C.z - 0.12],
+        [C.x + 0.12, C.y + 0.012, C.z - 0.12],
+        [C.x + 0.14, C.y + 0.004, C.z + 0.18]
+      ];
+      var bedside = new THREE.Vector3(C.x - 0.78, 0.92, C.z + 0.05);
+      for (var i = 0; i < 3; i++) {
+        var p = new THREE.Vector3(pts[i][0], pts[i][1], pts[i][2]);
+        var elec = new THREE.Mesh(elecGeo, elecMat);
+        elec.position.copy(p);
+        elec.raycast = function () {};
+        ecgGroup.add(elec);
+        // sagging cable over the bed edge to the bedside monitor point
+        var mid1 = p.clone().lerp(bedside, 0.35);  mid1.y = 0.70;
+        var mid2 = p.clone().lerp(bedside, 0.72);  mid2.y = 0.62 + i * 0.02;
+        var curve = new THREE.CatmullRomCurve3([p, mid1, mid2, bedside]);
+        var tube = new THREE.Mesh(
+          track(new THREE.TubeGeometry(curve, 28, 0.004, 6, false)), leadMat);
+        tube.raycast = function () {};
+        ecgGroup.add(tube);
+      }
+      root.add(ecgGroup);
+    }
+
+    function hideECGLeads() {
+      if (ecgGroup) ecgGroup.visible = false;
+    }
+
+    /* =====================================================
+       Per-frame update — host-driven, no rAF of its own
+       ===================================================== */
+    function update(dt) {
+      if (disposed) return;
+      dt = (typeof dt === 'number' && isFinite(dt) && dt > 0)
+         ? Math.min(dt, 0.1) : 0.016;
+
+      // zone hover glow lerp
+      var k = 1 - Math.exp(-HOVER_K * dt);
+      for (var i = 0; i < zones.length; i++) {
+        var z = zones[i];
+        var on = enabled && z.hover;
+        var tF = on ? FILL_HOVER : FILL_BASE;
+        var tE = on ? EDGE_HOVER : EDGE_BASE;
+        z.opF += (tF - z.opF) * k;
+        z.opE += (tE - z.opE) * k;
+        z.fill.material.opacity  = z.opF;
+        z.edges.material.opacity = z.opE;
+      }
+
+      var press = stepCPR(dt);   // compression hands
+      stepShock(dt);             // jolt + flash + glow spike -> shockOffset
+      applyChestPose(press);     // combined chest node pose
+    }
+
+    /* =====================================================
+       Enable / dispose
+       ===================================================== */
+    function setEnabled(v) {
+      enabled = !!v;
+      if (!enabled) {
+        if (hoveredZone) { hoveredZone.hover = false; hoveredZone = null; }
+        if (openPanelId && vrui) { vrui.hidePanel(openPanelId);
+                                   openPanelId = null; }
+      }
+    }
+
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      stopCPR();
+      if (shockAnim) {
+        if (shockAnim.joltNode) shockAnim.joltNode.position.y = shockAnim.baseY;
+        shockOffset = 0;
+        var res = shockAnim.resolve;
+        shockAnim = null;
+        res();
+      }
+      if (chestNode) { chestNode.position.y = chestBaseY; chestNode = null; }
+      if (openPanelId && vrui) { vrui.hidePanel(openPanelId);
+                                 openPanelId = null; }
+      if (root.parent) root.parent.remove(root);
+      for (var d = 0; d < disposables.length; d++) {
+        if (disposables[d] && disposables[d].dispose) disposables[d].dispose();
+      }
+      disposables.length = 0;
+      zones.length = 0;
+      zoneMeshes.length = 0;
+      padGlows.length = 0;
+      padsGroup = handsGroup = maskGroup = ecgGroup = flashSprite = null;
+      glowTex = null;
+      hoveredZone = null;
+    }
+
+    return {
+      buildZones: buildZones,
+      pick: pick,
+      hover: hover,
+      showDefibPads: showDefibPads,
+      hideDefibPads: hideDefibPads,
+      shock: shock,
+      startCPR: startCPR,
+      stopCPR: stopCPR,
+      setChestNode: setChestNode,
+      showOxygenMask: showOxygenMask,
+      hideOxygenMask: hideOxygenMask,
+      showECGLeads: showECGLeads,
+      hideECGLeads: hideECGLeads,
+      update: update,
+      setEnabled: setEnabled,
+      dispose: dispose,
+      _zones: zones      // exposed for tests / debugging
+    };
+  };
+})();
+
+</script>
+<script>
+/* =====================================================================
+   DOCTOR LINK — sim-side orchestration for the Dr. Okafor attending agent
+   ---------------------------------------------------------------------
+   Sits on top of window.VoiceBridge (the raw-WebSocket ElevenLabs client;
+   load voice-bridge.js FIRST). VoiceBridge owns the mic, the socket and
+   the protocol; DoctorLink owns the Doctor conversation:
+
+     - registers the Doctor's client tools (issue_order / show_heart /
+       hide_heart / assess / end_scenario) via VoiceBridge.registerTool,
+       routing each to a sim callback,
+     - feeds the agent situational awareness via VoiceBridge.sendContext
+       (the ElevenLabs "contextual_update" client event — the agent hears
+       about it without taking a turn):
+         nudge(text)  — scripted doctorNudges lines; the SIM decides when,
+                        the agent voices the idea naturally in character,
+         vitals(v)    — throttled one-line vitals summaries (>= 20 s apart,
+                        or sooner on a big delta: hr +/-15, sbp +/-15,
+                        spo2 +/-4, or the critical flag flipping),
+         event(text)  — discrete events, sent immediately ("patient just
+                        lost consciousness — rhythm shows VF").
+
+   The agent's coaching policy (Socratic, never names the order) lives in
+   its platform config; nothing here needs to enforce it. issue_order only
+   arrives once the trainee has committed to an action AND said why, so
+   onOrder(action, rationale) is always the trainee's own words.
+
+   API (window.DoctorLink):
+     init({ onOrder(action, rationale),  onShowHeart(), onHideHeart(),
+            onAssess(zone, what) -> finding string (optional return),
+            onEnd(),  onStatus(state),  onTranscript(who, text) })
+       All callbacks optional; every one is guarded. onAssess may return a
+       string (or Promise of one) — it is spoken back as the tool result.
+     start() / stop() / toggle()   — passthrough to VoiceBridge
+     isActive() -> boolean
+     nudge(text)   -> boolean (delivered?)
+     vitals(v)     -> boolean (sent, or suppressed by the throttle)
+                      v: { hr, sbp, dbp, spo2, rr, critical } — all optional
+     event(text)   -> boolean
+
+   Guarded throughout: no throw paths; everything degrades to a console
+   warning and a false return.
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  const TAG = '[DoctorLink]';
+
+  // ---- vitals throttle tuning ---------------------------------------------
+  const MIN_INTERVAL_MS = 20000;  // never chattier than one update per 20 s...
+  const DELTA_HR = 15;            // ...unless a delta this big (vs last SENT
+  const DELTA_SBP = 15;           //    values) or a critical-flag flip makes
+  const DELTA_SPO2 = 4;           //    it worth interrupting early.
+
+  let cb = {
+    onOrder: null, onShowHeart: null, onHideHeart: null,
+    onAssess: null, onEnd: null,
+  };
+  let inited = false;
+  let lastVitalsSentAt = 0;   // 0 = never sent -> first vitals() always goes
+  let lastSent = null;        // snapshot of the last vitals actually sent
+
+  function bridge() {
+    const vb = window.VoiceBridge;
+    if (!vb) console.warn(TAG + ' window.VoiceBridge missing — load voice-bridge.js first.');
+    return vb || null;
+  }
+
+  // Run a sim callback without letting it take the voice loop down.
+  function safeCall(fn, args) {
+    if (typeof fn !== 'function') return undefined;
+    try { return fn.apply(null, args || []); }
+    catch (e) { console.warn(TAG + ' sim callback threw:', e); return undefined; }
+  }
+
+  function num(x) {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // ---- tool handlers (agent -> sim) ---------------------------------------
+  // Each returns the string spoken back to the agent as the tool result.
+
+  function toolIssueOrder(p) {
+    const action = String((p && p.action) || '').trim();
+    const rationale = String((p && p.rationale) || '').trim();
+    if (!action) return 'I did not catch the order — say the action again.';
+    if (!rationale) return 'No rationale was given — ask the trainee why before ordering.';
+    safeCall(cb.onOrder, [action, rationale]);
+    return 'Order carried out: ' + action + '.';
+  }
+
+  function toolShowHeart() {
+    safeCall(cb.onShowHeart, []);
+    return 'Cardiac hologram is up.';
+  }
+
+  function toolHideHeart() {
+    safeCall(cb.onHideHeart, []);
+    return 'Hologram cleared.';
+  }
+
+  function toolAssess(p) {
+    const zone = String((p && p.zone) || '').trim();
+    const what = String((p && p.what) || '').trim();
+    if (!zone && !what) return 'I did not catch what to check.';
+    const finding = safeCall(cb.onAssess, [zone, what]);
+    // onAssess may return a finding string (or a Promise of one) — hand it
+    // straight back so the Doctor reports the sim's finding, not a guess.
+    if (finding && typeof finding.then === 'function') {
+      return finding.then(
+        f => String(f == null ? '' : f) || ('Checked ' + (what || zone) + '.'),
+        () => 'That check could not be completed.'
+      );
+    }
+    if (finding != null && String(finding)) return String(finding);
+    return 'Checking ' + (what ? what : zone) + (zone && what ? ' at the ' + zone : '') + '.';
+  }
+
+  function toolEndScenario() {
+    safeCall(cb.onEnd, []);
+    return 'Scenario ended.';
+  }
+
+  // ---- contextual updates (sim -> agent) ----------------------------------
+
+  function sendContext(text) {
+    const vb = bridge();
+    if (!vb || typeof vb.sendContext !== 'function') return false;
+    try { return vb.sendContext(text) === true; }
+    catch (e) { console.warn(TAG + ' sendContext failed:', e); return false; }
+  }
+
+  // Scripted doctorNudges line: the sim decides WHEN; framing the text as a
+  // director cue lets the agent voice the idea naturally, in character,
+  // instead of parroting the script.
+  function nudge(text) {
+    const t = String(text == null ? '' : text).trim();
+    if (!t) return false;
+    return sendContext(
+      'Coaching cue from the sim director — when you next speak, make this ' +
+      'point in your own words, in character, without naming any specific ' +
+      'order or dose the trainee has not said: ' + t
+    );
+  }
+
+  // Discrete events go out immediately (they are why the throttle exists:
+  // vitals are chatty, events are not).
+  function event(text) {
+    const t = String(text == null ? '' : text).trim();
+    if (!t) return false;
+    return sendContext('Event at the bedside: ' + t);
+  }
+
+  function summarizeVitals(v) {
+    const parts = [];
+    const hr = num(v.hr), sbp = num(v.sbp), dbp = num(v.dbp);
+    const spo2 = num(v.spo2), rr = num(v.rr);
+    if (hr != null) parts.push('HR ' + Math.round(hr));
+    if (sbp != null) parts.push('BP ' + Math.round(sbp) + (dbp != null ? '/' + Math.round(dbp) : ''));
+    if (spo2 != null) parts.push('SpO2 ' + Math.round(spo2) + '%');
+    if (rr != null) parts.push('RR ' + Math.round(rr));
+    if (!parts.length) return '';
+    let line = 'Current vitals: ' + parts.join(', ') + '.';
+    if (v.critical) line += ' Patient is CRITICAL.';
+    return line;
+  }
+
+  function bigDelta(v) {
+    if (!lastSent) return true;   // nothing sent yet -> always worth sending
+    const moved = (key, threshold) => {
+      const a = num(v[key]), b = num(lastSent[key]);
+      return a != null && b != null && Math.abs(a - b) >= threshold;
+    };
+    if (moved('hr', DELTA_HR)) return true;
+    if (moved('sbp', DELTA_SBP)) return true;
+    if (moved('spo2', DELTA_SPO2)) return true;
+    if (Boolean(v.critical) !== Boolean(lastSent.critical)) return true;
+    return false;
+  }
+
+  // Throttled: at most one update per MIN_INTERVAL_MS, EXCEPT when the
+  // picture changed enough that the Doctor should know now.
+  function vitals(v) {
+    if (!v || typeof v !== 'object') return false;
+    const now = Date.now();
+    const due = (now - lastVitalsSentAt) >= MIN_INTERVAL_MS;
+    if (!due && !bigDelta(v)) return false;
+    const line = summarizeVitals(v);
+    if (!line) return false;
+    if (!sendContext(line)) return false;     // socket down: keep old baseline
+    lastVitalsSentAt = now;
+    lastSent = {
+      hr: num(v.hr), sbp: num(v.sbp), spo2: num(v.spo2),
+      critical: Boolean(v.critical),
+    };
+    return true;
+  }
+
+  // ---- lifecycle -----------------------------------------------------------
+
+  function init(opts) {
+    opts = opts || {};
+    cb.onOrder = typeof opts.onOrder === 'function' ? opts.onOrder : null;
+    cb.onShowHeart = typeof opts.onShowHeart === 'function' ? opts.onShowHeart : null;
+    cb.onHideHeart = typeof opts.onHideHeart === 'function' ? opts.onHideHeart : null;
+    cb.onAssess = typeof opts.onAssess === 'function' ? opts.onAssess : null;
+    cb.onEnd = typeof opts.onEnd === 'function' ? opts.onEnd : null;
+
+    const vb = bridge();
+    if (!vb) return false;
+
+    // VoiceBridge.init wires status/transcript and its legacy onCommand sink.
+    // Legacy tools the agent may still call (give_fluids, spawn_item, ...)
+    // arrive there as one composed "action because rationale" string — split
+    // it back apart so the sim sees them through the same onOrder door.
+    try {
+      vb.init({
+        onCommand: function (text) {
+          const s = String(text == null ? '' : text);
+          const i = s.indexOf(' because ');
+          const action = (i >= 0 ? s.slice(0, i) : s).trim();
+          const rationale = (i >= 0 ? s.slice(i + 9) : '').trim();
+          if (action) safeCall(cb.onOrder, [action, rationale]);
+        },
+        onStatus: typeof opts.onStatus === 'function' ? opts.onStatus : undefined,
+        onTranscript: typeof opts.onTranscript === 'function' ? opts.onTranscript : undefined,
+      });
+    } catch (e) {
+      console.warn(TAG + ' VoiceBridge.init failed:', e);
+      return false;
+    }
+
+    if (typeof vb.registerTool !== 'function') {
+      console.warn(TAG + ' VoiceBridge.registerTool missing — Doctor tools not wired.');
+      return false;
+    }
+    vb.registerTool('issue_order', async (p) => toolIssueOrder(p));
+    vb.registerTool('show_heart', async () => toolShowHeart());
+    vb.registerTool('hide_heart', async () => toolHideHeart());
+    vb.registerTool('assess', async (p) => toolAssess(p));
+    vb.registerTool('end_scenario', async () => toolEndScenario());
+
+    inited = true;
+    return true;
+  }
+
+  function start() {
+    const vb = bridge();
+    if (!vb) return Promise.resolve(false);
+    if (!inited) console.warn(TAG + ' start() before init(); Doctor tools are not wired yet.');
+    try { return Promise.resolve(vb.start()); }
+    catch (e) { console.warn(TAG + ' start failed:', e); return Promise.resolve(false); }
+  }
+
+  function stop() {
+    const vb = bridge();
+    if (!vb) return Promise.resolve(false);
+    try { return Promise.resolve(vb.stop()); }
+    catch (e) { console.warn(TAG + ' stop failed:', e); return Promise.resolve(false); }
+  }
+
+  function toggle() {
+    const vb = bridge();
+    if (!vb) return;
+    try { vb.toggle(); } catch (e) { console.warn(TAG + ' toggle failed:', e); }
+  }
+
+  function isActive() {
+    const vb = bridge();
+    try { return Boolean(vb && vb.isActive()); } catch (e) { return false; }
+  }
+
+  window.DoctorLink = {
+    init, start, stop, toggle, isActive,
+    nudge, vitals, event,
+  };
+})();
+
+</script>
+<script>
+/* =====================================================================
+   heart-viz.js — floating holographic anatomical heart, live cardiac
+   status exhibit for the nurse-training VR ward. THREE r160 UMD global.
+
+   window.makeHeartViz(THREE, scene, opts) -> hv
+     hv.show()/hide()/isShown()
+     hv.setState({mode, hr, contractility})
+     hv.update(dt, now)
+     hv.dispose()
+
+   ANIMATION CHOICE: the merged heart mesh is kept INDEXED (~1.9k verts,
+   ~3.2k tris — under the 3k-vert / 6k-tri budget), so beats + VF quiver
+   are done by displacing a cached original-positions Float32Array
+   in place (positions.needsUpdate). Normals are NOT recomputed per
+   frame (displacements are small); CPR/asystole are scale-only.
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  var DEG = Math.PI / 180;
+  var TAU = Math.PI * 2;
+
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function smooth(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+  function angDiff(a, b) {
+    var d = (a - b) % TAU;
+    if (d > Math.PI) d -= TAU;
+    if (d < -Math.PI) d += TAU;
+    return d;
+  }
+  // deterministic pseudo-random from an index
+  function rnd(i) { var s = Math.sin(i * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
+
+  window.makeHeartViz = function (THREE, scene, opts) {
+    opts = opts || {};
+    var pos = opts.position || { x: -1.55, y: 1.45, z: -0.9 };
+
+    // ---- resource tracking -------------------------------------------
+    var geoms = [], mats = [], texs = [];
+    function trackG(g) { geoms.push(g); return g; }
+    function trackM(m) { mats.push(m); return m; }
+    function trackT(t) { texs.push(t); return t; }
+
+    // ==================================================================
+    // PROCEDURAL ANATOMY
+    // ==================================================================
+    // Ventricular surface model (front = +z, left = -x). v: 0 apex .. 1 base.
+    var GROOVE_TH = -0.55;          // interventricular sulcus, left-of-front
+    function radialScale(v) {       // silhouette: blunt apex -> broad base
+      var s = 0.24 + 0.86 * Math.pow(Math.sin(clamp(v * 1.12, 0, 1) * Math.PI / 2), 0.85);
+      return s;
+    }
+    function shapeXZ(theta, v) {    // directional multiplier (asymmetry)
+      var belly = Math.pow(Math.max(0, Math.sin(v * Math.PI)), 0.8);
+      var bulge = 1 + 0.14 * Math.max(0, Math.cos(theta - 2.55)) * belly;      // LV mass, left-rear
+      var flat = 1 - 0.07 * Math.max(0, Math.cos(theta - 0.9)) * belly;        // RV slightly flatter, right-front
+      var d = angDiff(theta, GROOVE_TH);
+      var groove = 1 - 0.085 * Math.exp(-(d * d) / 0.10) * belly;              // AV/IV sulcus
+      return bulge * flat * groove;
+    }
+    function apexShift(v) {         // apex swings down-left-forward
+      var k = Math.pow(1 - v, 2.2);
+      return { x: -0.20 * k, z: 0.07 * k };
+    }
+    // exact surface point (used for coronary paths so they hug the wall)
+    function surfacePoint(theta, v, lift) {
+      var r = 0.5 * radialScale(v) * shapeXZ(theta, v) * (lift || 1.0);
+      var a = apexShift(v);
+      return new THREE.Vector3(
+        (Math.sin(theta) * r) * 0.88 + a.x,
+        (v - 0.5) * 1.12,
+        (Math.cos(theta) * r) * 0.80 + a.z
+      );
+    }
+
+    function deformVentricle(g) {
+      var p = g.attributes.position, i, x, y, z, v, th, rad, m, a;
+      for (i = 0; i < p.count; i++) {
+        x = p.getX(i); y = p.getY(i); z = p.getZ(i);
+        v = clamp(y + 0.5, 0, 1);
+        th = Math.atan2(x, z);
+        rad = radialScale(v) * shapeXZ(th, v);
+        a = apexShift(v);
+        p.setXYZ(i, x * rad * 0.88 + a.x, y * 1.12, z * rad * 0.80 + a.z);
+      }
+    }
+
+    // indexed merge (keeps vertex count low for in-place displacement)
+    function mergeIndexed(list) {
+      var nv = 0, ni = 0, k, g;
+      for (k = 0; k < list.length; k++) { nv += list[k].attributes.position.count; ni += list[k].index.count; }
+      var P = new Float32Array(nv * 3);
+      var I = (nv > 65000) ? new Uint32Array(ni) : new Uint16Array(ni);
+      var vo = 0, io = 0, j;
+      for (k = 0; k < list.length; k++) {
+        g = list[k];
+        P.set(g.attributes.position.array, vo * 3);
+        var idx = g.index.array;
+        for (j = 0; j < idx.length; j++) I[io + j] = idx[j] + vo;
+        vo += g.attributes.position.count; io += idx.length;
+        g.dispose();
+      }
+      var out = new THREE.BufferGeometry();
+      out.setAttribute('position', new THREE.BufferAttribute(P, 3));
+      out.setIndex(new THREE.BufferAttribute(I, 1));
+      return out;
+    }
+
+    function tubeAlong(pts, radius, tubular, radial) {
+      var curve = new THREE.CatmullRomCurve3(pts);
+      var g = new THREE.TubeGeometry(curve, tubular, radius, radial, false);
+      g.deleteAttribute('uv'); g.deleteAttribute('normal');
+      return g;
+    }
+
+    function buildHeartGeometry() {
+      var parts = [];
+
+      // ventricular mass
+      var vent = new THREE.SphereGeometry(0.5, 28, 22);
+      vent.deleteAttribute('uv'); vent.deleteAttribute('normal');
+      deformVentricle(vent);
+      parts.push(vent);
+
+      // atria — two squashed lobes on the base, rear
+      var m = new THREE.Matrix4();
+      var atL = new THREE.SphereGeometry(0.5, 14, 10);
+      atL.deleteAttribute('uv'); atL.deleteAttribute('normal');
+      m.makeScale(0.62, 0.48, 0.56).premultiply(new THREE.Matrix4().makeRotationZ(0.25))
+        .premultiply(new THREE.Matrix4().makeTranslation(-0.10, 0.50, -0.16));
+      atL.applyMatrix4(m); parts.push(atL);
+      var atR = new THREE.SphereGeometry(0.5, 14, 10);
+      atR.deleteAttribute('uv'); atR.deleteAttribute('normal');
+      m.makeScale(0.52, 0.42, 0.50).premultiply(new THREE.Matrix4().makeRotationZ(-0.35))
+        .premultiply(new THREE.Matrix4().makeTranslation(0.26, 0.44, -0.04));
+      atR.applyMatrix4(m); parts.push(atR);
+
+      // aortic arch — rises from the base, hooks over to the left
+      parts.push(tubeAlong([
+        new THREE.Vector3(0.05, 0.42, 0.02),
+        new THREE.Vector3(0.09, 0.62, 0.00),
+        new THREE.Vector3(0.06, 0.80, -0.05),
+        new THREE.Vector3(-0.08, 0.88, -0.10),
+        new THREE.Vector3(-0.20, 0.79, -0.13),
+        new THREE.Vector3(-0.23, 0.60, -0.15)
+      ], 0.082, 22, 10));
+
+      // pulmonary trunk — shorter, crosses in front of the aorta
+      parts.push(tubeAlong([
+        new THREE.Vector3(0.16, 0.30, 0.16),
+        new THREE.Vector3(0.10, 0.48, 0.20),
+        new THREE.Vector3(-0.03, 0.60, 0.19),
+        new THREE.Vector3(-0.13, 0.66, 0.14)
+      ], 0.065, 14, 9));
+
+      // coronary vessels hugging the wall
+      function coronary(thA, thB, vA, vB, r) {
+        var pts = [], n = 6, i, t;
+        for (i = 0; i <= n; i++) {
+          t = i / n;
+          pts.push(surfacePoint(thA + (thB - thA) * t, vA + (vB - vA) * t, 1.008));
+        }
+        return tubeAlong(pts, r, 24, 5);
+      }
+      parts.push(coronary(GROOVE_TH + 0.05, GROOVE_TH - 0.25, 0.78, 0.10, 0.022)); // LAD, down the sulcus
+      parts.push(coronary(-0.9, -2.4, 0.74, 0.48, 0.019));                          // circumflex, around the left
+      parts.push(coronary(0.5, 1.8, 0.72, 0.34, 0.019));                            // right coronary
+
+      var g = mergeIndexed(parts);
+
+      // baked organic vertex noise
+      var p = g.attributes.position, i, x, y, z, n, len;
+      for (i = 0; i < p.count; i++) {
+        x = p.getX(i); y = p.getY(i); z = p.getZ(i);
+        n = (Math.sin(x * 21.3 + z * 17.1) + Math.sin(y * 19.7 + x * 13.3) + Math.sin(z * 23.1 + y * 11.9)) / 3;
+        len = Math.sqrt(x * x + y * y + z * z) || 1;
+        p.setXYZ(i, x + (x / len) * n * 0.012, y + (y / len) * n * 0.010, z + (z / len) * n * 0.012);
+      }
+      g.computeVertexNormals();
+      return g;
+    }
+
+    var heartGeo = trackG(buildHeartGeometry());
+    var VN = heartGeo.attributes.position.count;
+    var origPos = new Float32Array(heartGeo.attributes.position.array);        // cached originals
+    var origNrm = new Float32Array(heartGeo.attributes.normal.array);
+
+    // per-vertex precomputed weights
+    var wBeat = new Float32Array(VN);   // contraction weight (ventricles full, vessels barely)
+    var wedge = new Float32Array(VN);   // ischemic infarct wedge (lower anterior wall)
+    var vfPh = new Float32Array(VN);    // fibrillation phase
+    (function () {
+      var i, x, y, z, th, dth, a;
+      for (i = 0; i < VN; i++) {
+        x = origPos[i * 3]; y = origPos[i * 3 + 1]; z = origPos[i * 3 + 2];
+        wBeat[i] = clamp((0.50 - y) / 0.62, 0.12, 1.0);
+        th = Math.atan2(x, z);
+        dth = angDiff(th, -0.35);
+        a = Math.exp(-(dth * dth) / (2 * 0.55 * 0.55)) *
+            Math.exp(-((y + 0.26) * (y + 0.26)) / (2 * 0.22 * 0.22));
+        wedge[i] = clamp(a * 1.25, 0, 1);
+        vfPh[i] = rnd(i) * TAU;
+      }
+    })();
+
+    // vertex colors (all-white; the ischemic wedge tints grey-blue in place)
+    var colArr = new Float32Array(VN * 3);
+    for (var ci = 0; ci < colArr.length; ci++) colArr[ci] = 1;
+    heartGeo.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
+
+    // ==================================================================
+    // MATERIALS / SCENE GRAPH
+    // ==================================================================
+    var COL = {
+      healthy: new THREE.Color(0x9e1b24),
+      dusky:   new THREE.Color(0x5c3550),
+      grey:    new THREE.Color(0x44586b),
+      emisHealthy: new THREE.Color(0x3a070c),
+      emisDusky:   new THREE.Color(0x180d12),
+      emisGrey:    new THREE.Color(0x0c1013)
+    };
+    // Infarct wedge: vertex colors multiply the base color, so express the
+    // desired grey-blue as a per-channel RATIO over the healthy base
+    // (components may exceed 1 — attribute floats are not clamped).
+    var wedgeGoal = new THREE.Color(0x5a7086);
+    COL.wedgeTint = new THREE.Color(
+      clamp(wedgeGoal.r / Math.max(COL.healthy.r, 1e-4), 0, 10),
+      clamp(wedgeGoal.g / Math.max(COL.healthy.g, 1e-4), 0, 10),
+      clamp(wedgeGoal.b / Math.max(COL.healthy.b, 1e-4), 0, 10)
+    );
+
+    var heartMat = trackM(new THREE.MeshStandardMaterial({
+      color: COL.healthy.clone(),
+      emissive: COL.emisHealthy.clone(),
+      emissiveIntensity: 1.0,
+      roughness: 0.42, metalness: 0.04,
+      vertexColors: true
+    }));
+
+    var root = new THREE.Group();               // placement + show/hide scale
+    root.position.set(pos.x, pos.y, pos.z);
+    root.visible = false;
+    root.scale.setScalar(0.001);
+    scene.add(root);
+
+    var spin = new THREE.Group();               // exhibit rotation
+    root.add(spin);
+
+    var beatGrp = new THREE.Group();            // CPR / asystole scale effects
+    spin.add(beatGrp);
+
+    var heartMesh = new THREE.Mesh(heartGeo, heartMat);
+    heartMesh.rotation.set(0.10, 0, 0.16);      // organic posture tilt
+    heartMesh.scale.setScalar(0.30);            // ~34 cm exhibit
+    heartMesh.position.y = 0.02;
+    beatGrp.add(heartMesh);
+
+    // ---- holo pedestal ring ------------------------------------------
+    var ringGeo = trackG(new THREE.RingGeometry(0.16, 0.215, 48));
+    var ringMat = trackM(new THREE.MeshBasicMaterial({
+      color: 0x00e5ff, transparent: true, opacity: 0.32,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    var ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2; ring.position.y = -0.30;
+    root.add(ring);
+    var ring2Geo = trackG(new THREE.RingGeometry(0.24, 0.255, 48));
+    var ring2Mat = trackM(new THREE.MeshBasicMaterial({
+      color: 0x00e5ff, transparent: true, opacity: 0.10,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    var ring2 = new THREE.Mesh(ring2Geo, ring2Mat);
+    ring2.rotation.x = -Math.PI / 2; ring2.position.y = -0.30;
+    root.add(ring2);
+
+    // ---- cyan back-glow sprite ---------------------------------------
+    function radialTex(inner, outer) {
+      var c = document.createElement('canvas'); c.width = c.height = 128;
+      var g = c.getContext('2d');
+      var gr = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+      gr.addColorStop(0, inner); gr.addColorStop(1, outer);
+      g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+      var t = new THREE.CanvasTexture(c); return trackT(t);
+    }
+    var glowMat = trackM(new THREE.SpriteMaterial({
+      map: radialTex('rgba(0,229,255,0.55)', 'rgba(0,229,255,0)'),
+      transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    var glow = new THREE.Sprite(glowMat);
+    glow.scale.set(0.85, 0.85, 1); glow.position.set(0, 0.02, -0.10);
+    root.add(glow);
+
+    // ---- label -------------------------------------------------------
+    function labelTex() {
+      var c = document.createElement('canvas'); c.width = 512; c.height = 96;
+      var g = c.getContext('2d');
+      g.clearRect(0, 0, 512, 96);
+      g.font = '600 34px "Rajdhani","Segoe UI",monospace';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.shadowColor = 'rgba(0,229,255,0.9)'; g.shadowBlur = 14;
+      g.fillStyle = '#aef4ff';
+      g.fillText('CARDIAC STATUS — LIVE', 256, 48);
+      var t = new THREE.CanvasTexture(c);
+      t.anisotropy = 2; return trackT(t);
+    }
+    var labelMat = trackM(new THREE.SpriteMaterial({
+      map: labelTex(), transparent: true, opacity: 0.9, depthWrite: false
+    }));
+    var label = new THREE.Sprite(labelMat);
+    label.scale.set(0.42, 0.079, 1); label.position.y = -0.245;
+    root.add(label);
+
+    // small local fill light so the exhibit reads in the night ward
+    var fill = new THREE.PointLight(0xbfd4e6, 0.55, 1.6, 2.0);
+    fill.position.set(0.25, 0.35, 0.45);
+    root.add(fill);
+
+    // ==================================================================
+    // BLOOD-FLOW PARTICLES (cheap Points, <=40)
+    // ==================================================================
+    var PN = 36;
+    var pGeo = trackG(new THREE.BufferGeometry());
+    var pPos = new Float32Array(PN * 3);
+    for (var pi = 0; pi < PN; pi++) { pPos[pi * 3] = 0; pPos[pi * 3 + 1] = -9999; pPos[pi * 3 + 2] = 0; }
+    pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+    var pMat = trackM(new THREE.PointsMaterial({
+      color: 0xff8a80, size: 0.016, transparent: true, opacity: 0.95,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true
+    }));
+    var points = new THREE.Points(pGeo, pMat);
+    points.frustumCulled = false;
+    beatGrp.add(points);
+    // aorta exit in heart-mesh local space -> beatGrp space (mesh scaled 0.30)
+    var AORTA_OUT = new THREE.Vector3(-0.23, 0.60, -0.15);
+    var AORTA_DIR = new THREE.Vector3(-0.35, -0.9, -0.15).normalize();
+    var pVel = new Float32Array(PN * 3);
+    var pLife = new Float32Array(PN);
+    var pSeed = 0;
+    function emit(n, speed) {
+      var out = AORTA_OUT.clone().applyEuler(heartMesh.rotation).multiplyScalar(0.30);
+      out.y += 0.02;
+      var dir = AORTA_DIR.clone().applyEuler(heartMesh.rotation);
+      for (var k = 0; k < n; k++) {
+        var i = pSeed = (pSeed + 1) % PN;
+        pPos[i * 3] = out.x; pPos[i * 3 + 1] = out.y; pPos[i * 3 + 2] = out.z;
+        var j = i * 7 + 3;
+        pVel[i * 3]     = (dir.x + (rnd(j) - 0.5) * 0.5) * speed;
+        pVel[i * 3 + 1] = (dir.y + (rnd(j + 1) - 0.5) * 0.5) * speed;
+        pVel[i * 3 + 2] = (dir.z + (rnd(j + 2) - 0.5) * 0.5) * speed;
+        pLife[i] = 0.7 + rnd(j + 3) * 0.4;
+      }
+      pGeo.attributes.position.needsUpdate = true;
+    }
+    function stepParticles(dt) {
+      var live = false;
+      for (var i = 0; i < PN; i++) {
+        if (pLife[i] <= 0) continue;
+        live = true;
+        pLife[i] -= dt;
+        if (pLife[i] <= 0) { pPos[i * 3 + 1] = -9999; continue; }
+        pVel[i * 3 + 1] -= 0.10 * dt;         // gentle settle
+        var dr = Math.pow(0.15, dt);          // drag
+        pVel[i * 3] *= dr; pVel[i * 3 + 1] *= dr; pVel[i * 3 + 2] *= dr;
+        pPos[i * 3] += pVel[i * 3] * dt;
+        pPos[i * 3 + 1] += pVel[i * 3 + 1] * dt;
+        pPos[i * 3 + 2] += pVel[i * 3 + 2] * dt;
+      }
+      if (live) pGeo.attributes.position.needsUpdate = true;
+    }
+
+    // ==================================================================
+    // STATE + ANIMATION
+    // ==================================================================
+    var state = { mode: 'baseline', hr: 72, contractility: 1 };
+    var shown = false;
+    var showAnim = 0;            // 0..1 progress, -1 idle
+    var showDir = 0;             // +1 in, -1 out
+    var beatPhase = 0;
+    var period = 60 / 72;
+    var jitterMul = 1;
+    var wedgeAmt = 0, wedgeTgt = 0;
+    var curCol = COL.healthy.clone();
+    var curEmis = COL.emisHealthy.clone();
+    var tgtCol = COL.healthy.clone();
+    var tgtEmis = COL.emisHealthy.clone();
+    var vertsDirty = false;      // positions differ from originals
+
+    function setState(s) {
+      s = s || {};
+      if (s.mode) state.mode = s.mode;
+      if (typeof s.hr === 'number') state.hr = s.hr;
+      if (typeof s.contractility === 'number') state.contractility = clamp(s.contractility, 0, 1);
+      period = 60 / Math.max(20, state.hr || 72);
+      switch (state.mode) {
+        case 'ischemia':
+          wedgeTgt = 1; tgtCol.copy(COL.healthy); tgtEmis.copy(COL.emisHealthy); break;
+        case 'vf':
+          wedgeTgt = 0; tgtCol.copy(COL.dusky); tgtEmis.copy(COL.emisDusky); break;
+        case 'cpr':
+          wedgeTgt = 0; tgtCol.copy(COL.dusky); tgtEmis.copy(COL.emisDusky); break;
+        case 'rosc':
+          wedgeTgt = 0; break; // color driven by contractility in update
+        case 'asystole':
+          wedgeTgt = 0; tgtCol.copy(COL.grey); tgtEmis.copy(COL.emisGrey); break;
+        default: // baseline
+          wedgeTgt = 0; tgtCol.copy(COL.healthy); tgtEmis.copy(COL.emisHealthy);
+      }
+    }
+
+    function restoreVerts() {
+      if (!vertsDirty) return;
+      heartGeo.attributes.position.array.set(origPos);
+      heartGeo.attributes.position.needsUpdate = true;
+      vertsDirty = false;
+    }
+
+    function applyBeatVerts(amount) { // amount: 0..~0.14 radial squeeze
+      var P = heartGeo.attributes.position.array, i, w, k, ox, oy, oz;
+      for (i = 0; i < VN; i++) {
+        w = wBeat[i];
+        if (wedgeAmt > 0) w *= (1 - 0.8 * wedgeAmt * wedge[i]);   // infarct wall barely moves
+        k = amount * w;
+        ox = origPos[i * 3]; oy = origPos[i * 3 + 1]; oz = origPos[i * 3 + 2];
+        P[i * 3]     = ox * (1 - k);
+        P[i * 3 + 1] = oy + (0.42 - oy) * k * 0.45;               // longitudinal shortening
+        P[i * 3 + 2] = oz * (1 - k);
+      }
+      heartGeo.attributes.position.needsUpdate = true;
+      vertsDirty = true;
+    }
+
+    function applyQuiverVerts(now) {  // fine chaotic fibrillation ~10 Hz
+      var P = heartGeo.attributes.position.array, i, s;
+      var w1 = TAU * 9.0 * now, w2 = TAU * 12.5 * now;
+      for (i = 0; i < VN; i++) {
+        s = (Math.sin(w1 + vfPh[i]) * 0.6 + Math.sin(w2 + vfPh[i] * 2.7) * 0.4) * 0.017 * wBeat[i];
+        P[i * 3]     = origPos[i * 3]     + origNrm[i * 3] * s;
+        P[i * 3 + 1] = origPos[i * 3 + 1] + origNrm[i * 3 + 1] * s;
+        P[i * 3 + 2] = origPos[i * 3 + 2] + origNrm[i * 3 + 2] * s;
+      }
+      heartGeo.attributes.position.needsUpdate = true;
+      vertsDirty = true;
+    }
+
+    function updateWedgeColors() {
+      var i, t;
+      for (i = 0; i < VN; i++) {
+        t = wedgeAmt * wedge[i];
+        colArr[i * 3]     = 1 + (COL.wedgeTint.r - 1) * t;
+        colArr[i * 3 + 1] = 1 + (COL.wedgeTint.g - 1) * t;
+        colArr[i * 3 + 2] = 1 + (COL.wedgeTint.b - 1) * t;
+      }
+      heartGeo.attributes.color.needsUpdate = true;
+    }
+
+    // pulse envelope: quick systolic squeeze, longer diastolic relax
+    function pulseShape(ph) {
+      if (ph >= 0.38) return 0;
+      return Math.pow(Math.sin((ph / 0.38) * Math.PI), 1.4);
+    }
+    function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+    function update(dt, now) {
+      if (!(dt > 0)) dt = 0.016;
+      if (dt > 0.1) dt = 0.1;
+      if (typeof now !== 'number') now = performance.now() / 1000;
+
+      // show/hide scale animation
+      if (showDir !== 0) {
+        showAnim += dt / 0.4;
+        var t = clamp(showAnim, 0, 1);
+        var sc = showDir > 0 ? easeOutCubic(t) : (1 - easeOutCubic(t));
+        root.scale.setScalar(Math.max(0.001, sc));
+        if (t >= 1) {
+          if (showDir < 0) root.visible = false;
+          showDir = 0;
+        }
+      }
+      if (!root.visible) return;
+
+      // exhibit rotation ~8 deg/s
+      spin.rotation.y += 8 * DEG * dt;
+
+      // color easing
+      if (state.mode === 'rosc') {
+        tgtCol.copy(COL.dusky).lerp(COL.healthy, state.contractility);
+        tgtEmis.copy(COL.emisDusky).lerp(COL.emisHealthy, state.contractility);
+      }
+      var cl = 1 - Math.pow(0.10, dt);
+      curCol.lerp(tgtCol, cl); curEmis.lerp(tgtEmis, cl);
+      heartMat.color.copy(curCol); heartMat.emissive.copy(curEmis);
+
+      // ischemic wedge tint easing (only rewrites colors while changing)
+      if (Math.abs(wedgeTgt - wedgeAmt) > 0.004) {
+        wedgeAmt += (wedgeTgt - wedgeAmt) * (1 - Math.pow(0.06, dt));
+        updateWedgeColors();
+      }
+
+      // ring shimmer
+      ringMat.opacity = 0.26 + 0.08 * Math.sin(now * 2.1);
+      glowMat.opacity = 0.42 + 0.07 * Math.sin(now * 1.7 + 1.3);
+
+      // ---- per-mode motion -------------------------------------------
+      var mode = state.mode;
+      beatGrp.scale.set(1, 1, 1);
+      beatGrp.position.y = 0;
+
+      if (mode === 'baseline' || mode === 'ischemia' || mode === 'rosc') {
+        beatPhase += dt / (period * jitterMul);
+        if (beatPhase >= 1) {
+          beatPhase %= 1;
+          jitterMul = (mode === 'ischemia') ? (0.85 + rnd(Math.floor(now * 997)) * 0.35) : 1;
+          var c = state.contractility;
+          var n = mode === 'rosc' ? Math.max(1, Math.round(5 * c)) : (mode === 'ischemia' ? 4 : 6);
+          emit(n, 0.22 + 0.30 * c * (mode === 'ischemia' ? 0.7 : 1));
+        }
+        var amp = 0.13 * state.contractility * (mode === 'ischemia' ? 0.65 : 1);
+        applyBeatVerts(pulseShape(beatPhase) * amp);
+      } else if (mode === 'vf') {
+        applyQuiverVerts(now);
+      } else if (mode === 'cpr') {
+        // external compressions at ~1.8 Hz — scale-only squeeze
+        restoreVerts();
+        beatPhase += dt * 1.8;
+        var cph = beatPhase % 1;
+        var sq = cph < 0.5 ? Math.sin(cph * 2 * Math.PI / 2) : Math.sin((1 - cph) * 2 * Math.PI / 2);
+        sq = Math.pow(Math.max(0, sq), 1.2);
+        beatGrp.scale.set(1 + 0.10 * sq, 1 + 0.05 * sq, 1 - 0.22 * sq);
+        if (beatPhase >= 1) { beatPhase %= 1; emit(1, 0.10); }   // dribble
+      } else { // asystole
+        restoreVerts();
+        beatGrp.scale.set(1.035, 0.89, 1.035);                   // sag
+        beatGrp.position.y = -0.018;
+      }
+
+      stepParticles(dt);
+    }
+
+    // ==================================================================
+    // API
+    // ==================================================================
+    var hv = {
+      show: function () {
+        if (shown && showDir === 0) return;
+        shown = true; root.visible = true;
+        showAnim = (showDir === -1) ? 1 - showAnim : 0;
+        showDir = 1;
+      },
+      hide: function () {
+        if (!shown && showDir === 0) return;
+        shown = false;
+        showAnim = (showDir === 1) ? 1 - showAnim : 0;
+        showDir = -1;
+      },
+      isShown: function () { return shown; },
+      setState: setState,
+      update: update,
+      dispose: function () {
+        scene.remove(root);
+        var i;
+        for (i = 0; i < geoms.length; i++) geoms[i].dispose();
+        for (i = 0; i < mats.length; i++) mats[i].dispose();
+        for (i = 0; i < texs.length; i++) texs[i].dispose();
+        geoms.length = mats.length = texs.length = 0;
+      },
+      group: root
+    };
+    setState(state);
+    return hv;
   };
 })();
 
