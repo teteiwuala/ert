@@ -3924,9 +3924,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   const CY = 0x00e5ff, CYs = '#00e5ff', AMBER = '#ffb020';
 
   // ---- renderer / scene / camera -----------------------------------------
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // Memory-constrained GPUs (Quest / standalone-VR browsers, phones) OOM-kill the
+  // tab when the 3D room builds at full DPR + MSAA + shadow maps. Detect them and
+  // build a lighter pipeline — WebGL still works, we just spend far less VRAM.
+  const LOW_GPU = (function(){
+    try {
+      var ua = navigator.userAgent || '';
+      if (/OculusBrowser|Quest|Pico|Wolvic|VR/i.test(ua)) return true;
+      if (/Mobi|Android|iPhone|iPad|iPod/i.test(ua)) return true;
+      if (typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4) return true;
+    } catch (e) { return true; }
+    return false;
+  })();
+  window.__LOW_GPU = LOW_GPU;
+  const renderer = new THREE.WebGLRenderer({ antialias: !LOW_GPU, alpha: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(LOW_GPU ? 1 : Math.min(window.devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
+  // When they DO enter VR on a headset, render the eye buffers below native res too.
+  if (LOW_GPU && renderer.xr && renderer.xr.setFramebufferScaleFactor) {
+    try { renderer.xr.setFramebufferScaleFactor(0.7); } catch (e) {}
+  }
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
   document.getElementById('app').appendChild(renderer.domElement);
@@ -4327,6 +4344,24 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
   // Warm the models shortly after the hub renders so the room is ready on click.
   setTimeout(preloadWard, 400);
+  // Debug/QA: ?autoscene=<id> mounts a scenario without a click (headless testing).
+  try {
+    var __qs = new URLSearchParams(location.search);
+    var __au = __qs.get('autoscene');
+    if (__au) setTimeout(function () {
+      var p = panels.filter(function (pp) { return pp.s && pp.s.id === __au; })[0];
+      if (p) selectPanel(p);
+      if (__qs.get('autobegin')) {
+        var __clickBtn = function (re) {
+          var b = Array.prototype.slice.call(document.querySelectorAll('button'))
+            .filter(function (x) { return re.test(x.textContent || ''); })[0];
+          if (b) b.click();
+        };
+        setTimeout(function () { __clickBtn(/play offline/i); }, 900);
+        setTimeout(function () { __clickBtn(/begin scenario/i); }, 1700);
+      }
+    }, 1200);
+  } catch (e) {}
 
   let vrui = null, pInteract = null, heartViz = null, savedCPRView = null;
   function mountWard(scn) {
@@ -7085,10 +7120,17 @@ if (typeof window !== 'undefined') {
     // ------------------------------------------------------------------
     const BASE_EXPOSURE = 0.72;
     if (renderer) {
-      if (!renderer.shadowMap.enabled) renderer.shadowMap.enabled = true;
-      if (renderer.shadowMap.type !== THREE.PCFSoftShadowMap) {
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        renderer.shadowMap.needsUpdate = true;
+      // Shadow maps allocate extra render targets — the single biggest VRAM cost
+      // when the room builds. Skip them entirely on constrained GPUs (Quest/phone);
+      // the night-shift lighting still reads fine without cast shadows.
+      if (!window.__LOW_GPU) {
+        if (!renderer.shadowMap.enabled) renderer.shadowMap.enabled = true;
+        if (renderer.shadowMap.type !== THREE.PCFSoftShadowMap) {
+          renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+          renderer.shadowMap.needsUpdate = true;
+        }
+      } else {
+        renderer.shadowMap.enabled = false;
       }
       if (renderer.toneMapping !== THREE.ACESFilmicToneMapping) {
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
