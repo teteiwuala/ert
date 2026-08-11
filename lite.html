@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code in Bay 2 — Early Recognition Trainer (Lite)</title>
+<meta name="description" content="A lightweight, always-loads emergency nursing scenario: a post-op patient deteriorates toward cardiac arrest. Assess, intervene, run the code.">
+<style>
+  :root{
+    --bg:#0a0d10; --panel:#12171c; --panel-2:#0e1317; --ink:#e9eef1; --muted:#8a9aa3; --faint:#5b6a72;
+    --line:rgba(160,190,200,.14); --line-strong:rgba(160,190,200,.26);
+    --ecg:#37e08b; --amber:#f0b429; --red:#ff5a52; --blue:#7cc7ff;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,"Cascadia Mono","Courier New",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:var(--sans); overflow:hidden}
+  #app{position:fixed; inset:0; display:flex; flex-direction:column}
+
+  /* top strip */
+  .top{display:flex; align-items:center; justify-content:space-between; padding:10px 16px; border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,var(--panel),var(--panel-2)); flex:0 0 auto; z-index:5}
+  .brand{font-family:var(--mono); font-size:12px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted)}
+  .brand b{color:var(--ink)}
+  .clock{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:15px; color:var(--ecg); letter-spacing:.08em}
+  .clock.crit{color:var(--red)}
+
+  /* stage */
+  .stage{position:relative; flex:1 1 auto; min-height:0; overflow:hidden}
+  #scene{position:absolute; inset:0; width:100%; height:100%; display:block}
+
+  /* vitals monitor overlay */
+  .monitor{position:absolute; top:12px; right:12px; width:min(300px,44vw); background:rgba(9,13,16,.82);
+    border:1px solid var(--line-strong); border-radius:12px; padding:12px 12px 8px; backdrop-filter:blur(3px)}
+  .monitor h4{margin:0 0 8px; font-family:var(--mono); font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint)}
+  .vrow{display:grid; grid-template-columns:1fr 1fr; gap:6px}
+  .v{background:rgba(255,255,255,.03); border:1px solid var(--line); border-radius:8px; padding:6px 9px}
+  .v .lab{font-family:var(--mono); font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint)}
+  .v .num{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:24px; line-height:1.05; color:var(--ecg)}
+  .v .num small{font-size:11px; color:var(--muted)}
+  .v.warn .num{color:var(--amber)} .v.crit .num{color:var(--red)}
+  #ecg{width:100%; height:52px; margin-top:8px; display:block; border-radius:6px; background:rgba(0,0,0,.35)}
+
+  /* dialogue log */
+  .log{position:absolute; left:12px; bottom:12px; width:min(520px,72vw); max-height:34%; overflow:hidden;
+    display:flex; flex-direction:column-reverse; gap:6px; pointer-events:none}
+  .msg{font-size:13px; line-height:1.45; background:rgba(9,13,16,.8); border:1px solid var(--line); border-left:3px solid var(--faint);
+    border-radius:8px; padding:8px 11px; color:var(--ink); animation:rise .25s ease}
+  .msg .who{font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; margin-right:8px}
+  .msg.you{border-left-color:var(--blue)} .msg.you .who{color:var(--blue)}
+  .msg.pt{border-left-color:var(--ecg)} .msg.pt .who{color:var(--ecg)}
+  .msg.sys{border-left-color:var(--amber)} .msg.sys .who{color:var(--amber)}
+  .msg.bad{border-left-color:var(--red)} .msg.bad .who{color:var(--red)}
+  @keyframes rise{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
+
+  /* action bar */
+  .bar{flex:0 0 auto; border-top:1px solid var(--line); background:linear-gradient(0deg,var(--panel),var(--panel-2));
+    padding:10px 12px; display:flex; gap:16px; align-items:flex-start; overflow-x:auto; z-index:5}
+  .group{display:flex; flex-direction:column; gap:6px; min-width:max-content}
+  .group .gl{font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); padding-left:2px}
+  .btns{display:flex; gap:6px; flex-wrap:wrap; max-width:none}
+  button.act{font-family:var(--mono); font-size:12px; letter-spacing:.02em; color:var(--ink); background:rgba(255,255,255,.04);
+    border:1px solid var(--line-strong); border-radius:7px; padding:9px 12px; cursor:pointer; white-space:nowrap; transition:all .12s}
+  button.act:hover{border-color:var(--ecg); color:var(--ecg)}
+  button.act.emerg{border-color:rgba(255,90,82,.5)} button.act.emerg:hover{border-color:var(--red); color:var(--red)}
+  button.act.wait{border-color:rgba(124,199,255,.4)} button.act.wait:hover{border-color:var(--blue); color:var(--blue)}
+  button.act:disabled{opacity:.35; cursor:not-allowed}
+
+  /* overlays: gate + debrief */
+  .overlay{position:absolute; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; padding:24px;
+    background:radial-gradient(900px 500px at 60% 0%, rgba(55,224,139,.06), transparent 60%), rgba(6,9,11,.92)}
+  .overlay.hidden{display:none}
+  .card{max-width:560px; width:100%; background:var(--panel); border:1px solid var(--line-strong); border-radius:14px; padding:28px 26px}
+  .card .eye{font-family:var(--mono); font-size:11px; letter-spacing:.2em; text-transform:uppercase; color:var(--ecg); margin:0 0 10px}
+  .card h1{font-family:var(--mono); font-weight:600; font-size:26px; margin:0 0 14px; letter-spacing:-.01em}
+  .card .sbar{font-size:14.5px; color:var(--muted); line-height:1.6; margin:0 0 12px}
+  .card .sbar b{color:var(--ink)}
+  .card .sbar .tag{font-family:var(--mono); color:var(--ecg); font-size:11px; letter-spacing:.1em}
+  .card ul{margin:6px 0 18px; padding-left:18px; color:var(--muted); font-size:13.5px; line-height:1.6}
+  .go{font-family:var(--mono); font-size:14px; letter-spacing:.05em; font-weight:700; background:var(--ecg); color:#03170d;
+    border:none; border-radius:8px; padding:14px 24px; cursor:pointer; width:100%}
+  .go:hover{background:#4cf29c}
+  .go.ghost{background:transparent; color:var(--ink); border:1px solid var(--line-strong); font-weight:500; margin-top:10px}
+  .note{font-size:11.5px; color:var(--faint); margin:16px 0 0; line-height:1.5}
+
+  /* debrief content */
+  .verdict{font-family:var(--mono); font-size:22px; margin:0 0 4px}
+  .verdict.win{color:var(--ecg)} .verdict.loss{color:var(--red)}
+  .scoreline{font-family:var(--mono); font-size:13px; color:var(--muted); margin:0 0 18px}
+  .checks{list-style:none; margin:0 0 20px; padding:0}
+  .checks li{display:flex; gap:10px; align-items:baseline; padding:9px 0; border-top:1px solid var(--line); font-size:13.5px}
+  .checks li .mk{font-family:var(--mono); flex:0 0 auto; width:20px}
+  .checks li.pass .mk{color:var(--ecg)} .checks li.fail .mk{color:var(--red)}
+  .checks li .d{color:var(--muted)} .checks li .d b{color:var(--ink); font-weight:600}
+
+  @media(max-width:560px){
+    .monitor{width:52vw; top:8px; right:8px; padding:9px}
+    .v .num{font-size:19px}
+    .log{width:92vw}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="top">
+    <div class="brand"><b>Code in Bay&nbsp;2</b> · Early Recognition Trainer</div>
+    <div class="clock" id="clock">00:00</div>
+  </div>
+
+  <div class="stage">
+    <canvas id="scene"></canvas>
+
+    <div class="monitor" aria-label="Patient monitor">
+      <h4>Bedside Monitor · Bay 2</h4>
+      <div class="vrow">
+        <div class="v" id="v-hr"><div class="lab">HR bpm</div><div class="num" id="n-hr">—</div></div>
+        <div class="v" id="v-bp"><div class="lab">NIBP mmHg</div><div class="num" id="n-bp">—</div></div>
+        <div class="v" id="v-spo2"><div class="lab">SpO₂ %</div><div class="num" id="n-spo2">—</div></div>
+        <div class="v" id="v-rr"><div class="lab">RR /min</div><div class="num" id="n-rr">—</div></div>
+      </div>
+      <canvas id="ecg"></canvas>
+    </div>
+
+    <div class="log" id="log"></div>
+
+    <!-- start gate -->
+    <div class="overlay" id="gate">
+      <div class="card">
+        <p class="eye">Shift handoff · SBAR</p>
+        <h1>You're the nurse. He's your patient.</h1>
+        <p class="sbar">
+          <span class="tag">S</span> &nbsp;<b>Mr. R. Delgado, 61.</b> Post-op day 1, right hip replacement. Just called out — chest pressure and short of breath.<br>
+          <span class="tag">B</span> &nbsp;History of hypertension and high cholesterol. Independent before surgery.<br>
+          <span class="tag">A</span> &nbsp;Diaphoretic, clutching his chest, anxious. Monitor's alarming.<br>
+          <span class="tag">R</span> &nbsp;You just walked in. Nobody else is in the room yet.
+        </p>
+        <ul>
+          <li><b>Assess</b> with the buttons — findings read back from his live state.</li>
+          <li><b>Intervene</b> when you've reasoned it through. Timing is scored.</li>
+          <li>If he arrests, <b>run the code</b> — recognize it, call it, and act.</li>
+        </ul>
+        <button class="go" id="beginBtn">▶ Begin the shift</button>
+        <p class="note">Training simulation only — not medical advice. Clinical content is a draft pending nurse-educator review.</p>
+      </div>
+    </div>
+
+    <!-- debrief -->
+    <div class="overlay hidden" id="debrief">
+      <div class="card">
+        <p class="eye">After-action · Form ERT-1</p>
+        <p class="verdict" id="verdict">—</p>
+        <p class="scoreline" id="scoreline"></p>
+        <ul class="checks" id="checks"></ul>
+        <button class="go" id="againBtn">↻ Run it again</button>
+        <button class="go ghost" id="fullBtn">Open the full 3D / VR version</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="bar" id="bar">
+    <div class="group">
+      <span class="gl">Assess</span>
+      <div class="btns">
+        <button class="act" data-a="pulse">Check pulse</button>
+        <button class="act" data-a="listen">Listen to chest</button>
+        <button class="act" data-a="bp">Take BP</button>
+        <button class="act" data-a="airway">Check airway</button>
+        <button class="act" data-a="ecg">12-lead ECG</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="gl">Intervene</span>
+      <div class="btns">
+        <button class="act" data-a="oxygen">Oxygen</button>
+        <button class="act" data-a="aspirin">Aspirin 324mg</button>
+        <button class="act" data-a="help">Call rapid response</button>
+        <button class="act" data-a="nitro">Nitroglycerin</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="gl">Run the code</span>
+      <div class="btns">
+        <button class="act emerg" data-a="cpr">Start CPR</button>
+        <button class="act emerg" data-a="defib">Defibrillate</button>
+        <button class="act emerg" data-a="epi">Epinephrine</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="gl">Time</span>
+      <div class="btns"><button class="act wait" data-a="wait">Wait 15s ⏩</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+// ---------- state ----------
+var S = {
+  t:0, running:false, ended:false, phase:'ischemia', // ischemia | arrest | rosc | dead
+  o2:false, aspirin:false, help:false, nitro:false, ecgDone:false,
+  cpr:false, shocks:0, epi:0,
+  arrestAt:120, arrestT:0, roscT:0, deadWindow:120,
+  cprStartedT:null, firstShockT:null, helpT:null, aspirinT:null, recognizedArrestT:null,
+  log:[]
+};
+// supportive care buys a little time before the ischemia tips into VF
+function computeArrestAt(){ return 120 + (S.help?18:0) + (S.aspirin?12:0) + (S.o2?10:0); }
+
+// ---------- vitals model ----------
+var V = {hr:96, sbp:150, dbp:92, spo2:94, rr:22};
+function clamp(x,a,b){ return x<a?a:(x>b?b:x); }
+function computeVitals(){
+  if(S.phase==='ischemia'){
+    var p = clamp(S.t / S.arrestAt, 0, 1);
+    V.hr  = Math.round(96 + 34*p);
+    V.sbp = Math.round(150 - 66*p);
+    V.dbp = Math.round(V.sbp*0.62);
+    var base = 94 - 6*p; if(S.o2) base += 3.5;
+    V.spo2 = Math.round(clamp(base,84,99));
+    V.rr  = Math.round(22 + 8*p);
+    if(S.t >= S.arrestAt){ enterArrest(); }
+  } else if(S.phase==='arrest'){
+    V.hr = 0; V.sbp = 0; V.dbp = 0; V.rr = 0;
+    var since = S.t - S.arrestT;
+    var floorSpo2 = S.cpr ? 68 : 42;
+    V.spo2 = Math.round(clamp(72 - since*0.6 + (S.cpr?8:0), floorSpo2, 80));
+    // ROSC if CPR running AND at least one shock delivered while shockable
+    if(S.cpr && S.shocks>=1 && (S.t - S.firstShockT) >= 8 && S.phase==='arrest'){
+      enterRosc();
+    } else if(since > S.deadWindow){
+      enterDead();
+    }
+  } else if(S.phase==='rosc'){
+    var q = clamp((S.t - S.roscT)/40, 0, 1);
+    V.hr  = Math.round(118 - 30*q);
+    V.sbp = Math.round(78 + 34*q);
+    V.dbp = Math.round(V.sbp*0.62);
+    V.spo2= Math.round(clamp(88 + 9*q,88,99));
+    V.rr  = Math.round(24 - 6*q);
+  } else { // dead
+    V.hr=0; V.sbp=0; V.dbp=0; V.spo2=0; V.rr=0;
+  }
+}
+function enterArrest(){
+  if(S.phase!=='ischemia') return;
+  S.phase='arrest'; S.arrestT=S.t;
+  say('sys','MONITOR','⚠ Ventricular fibrillation — the waveform just went chaotic. He slumps back, unresponsive.');
+  say('sys','MONITOR','No palpable pulse. This is a cardiac arrest.');
+}
+function enterRosc(){
+  S.phase='rosc'; S.roscT=S.t;
+  say('pt','MONITOR','A rhythm returns on the monitor — narrow complexes, a real pulse. ROSC.');
+  say('sys','CHARGE RN','"Good work — we've got him back. Keep the pads on and watch him."');
+  endGame(true);
+}
+function enterDead(){
+  S.phase='dead';
+  say('bad','MONITOR','The rhythm has gone flat. Prolonged arrest without effective resuscitation.');
+  endGame(false);
+}
+
+// ---------- actions ----------
+function inArrest(){ return S.phase==='arrest'; }
+function actions(a){
+  if(S.ended) return;
+  switch(a){
+    case 'wait': fastForward(15); return;
+
+    case 'pulse':
+      if(inArrest()){ if(S.recognizedArrestT===null) S.recognizedArrestT=S.t;
+        say('you','YOU','Check a carotid pulse.'); say('bad','FINDING','No pulse. He is pulseless.'); }
+      else say2('Check a radial pulse.', 'FINDING', 'Pulse '+V.hr+' bpm — fast and thready.'); return;
+    case 'listen':
+      if(inArrest()){ say('you','YOU','Listen for breath sounds.'); say('bad','FINDING','No spontaneous breathing.'); }
+      else say2('Listen to the chest.', 'FINDING', 'Tachycardic, lungs clear. He winces — "it's like an elephant on my chest."'); return;
+    case 'bp':
+      if(inArrest()) say2('Cycle a blood pressure.','FINDING','No measurable pressure.');
+      else say2('Cycle a blood pressure.','FINDING','BP '+V.sbp+'/'+V.dbp+' mmHg.'); return;
+    case 'airway':
+      if(inArrest()) say2('Check the airway.','FINDING','Airway open — but he is not breathing on his own.');
+      else say2('Check the airway.','FINDING','Airway patent, speaking in short sentences.'); return;
+    case 'ecg':
+      S.ecgDone=true;
+      if(inArrest()) say2('Read the rhythm.','12-LEAD','Coarse ventricular fibrillation — a shockable rhythm.');
+      else say2('Run a 12-lead.','12-LEAD','ST-segment elevation, anterior leads. This is a STEMI — an evolving heart attack.'); return;
+
+    case 'oxygen':
+      if(S.o2){ say('sys','NOTE','Oxygen already running.'); return; }
+      S.o2=true; say2('Apply high-flow oxygen.','PATIENT','"...that's a little easier." SpO₂ ticks up.');
+      S.arrestAt=computeArrestAt(); return;
+    case 'aspirin':
+      if(S.aspirin){ say('sys','NOTE','Aspirin already given.'); return; }
+      if(inArrest()){ say('bad','NOTE','He can\'t swallow in arrest — this isn\'t the moment.'); return; }
+      S.aspirin=true; S.aspirinT=S.t; say2('Give 324 mg aspirin, chewed.','PATIENT','He chews it down. (Right call for a suspected MI.)');
+      S.arrestAt=computeArrestAt(); return;
+    case 'help':
+      if(S.help){ say('sys','NOTE','Rapid response already coming.'); return; }
+      S.help=true; S.helpT=S.t;
+      say2('Call the rapid response / code team.','CHARGE RN','"On my way — bringing the crash cart and the defibrillator."');
+      S.arrestAt=computeArrestAt(); return;
+    case 'nitro':
+      if(inArrest()){ say('bad','NOTE','Not in a pulseless arrest.'); return; }
+      if(V.sbp<100){ say('bad','CAUTION','His pressure is '+V.sbp+' — nitro could drop it dangerously. Hold it.'); S.nitro=true; return; }
+      S.nitro=true; say2('Give sublingual nitroglycerin.','PATIENT','"The pressure eased off a bit." (Reasonable while his BP holds.)'); return;
+
+    case 'cpr':
+      if(!inArrest()){ gate('CPR'); return; }
+      if(S.cpr){ say('sys','NOTE','Compressions already in progress.'); return; }
+      S.cpr=true; S.cprStartedT=S.t; if(S.recognizedArrestT===null) S.recognizedArrestT=S.t;
+      say2('Start chest compressions — hard and fast, centre of the chest.','TEAM','Compressions underway. Someone counts the rhythm.'); return;
+    case 'defib':
+      if(!inArrest()){ gate('Defibrillation'); return; }
+      if(!S.help){ say('bad','NOTE','There\'s no defibrillator at the bedside yet — you never called for the cart.'); return; }
+      S.shocks++; if(S.firstShockT===null) S.firstShockT=S.t;
+      flash();
+      say2('Charge to 200 J — everyone clear — shock.','TEAM','The body jolts. '+(S.cpr?'Resume compressions immediately.':'⚠ You paused — get compressions going!')); return;
+    case 'epi':
+      if(!inArrest()){ gate('Epinephrine'); return; }
+      S.epi++; say2('1 mg epinephrine IV.','TEAM','Epi is in. Continue the cycle.'); return;
+  }
+}
+function gate(name){
+  say('bad','STOP', name+' on a patient who still has a pulse and a pressure would cause harm. He\'s having a heart attack, not an arrest — what does he need *right now*?');
+}
+function say2(you, who, txt){ say('you','YOU',you); say('pt',who,txt); }
+
+// ---------- log ----------
+function say(kind, who, text){
+  S.log.push({t:S.t, kind:kind, who:who, text:text});
+  var el=document.getElementById('log');
+  var d=document.createElement('div'); d.className='msg '+kind;
+  d.innerHTML='<span class="who">'+who+'</span>'+text;
+  el.insertBefore(d, el.firstChild);
+  while(el.children.length>6) el.removeChild(el.lastChild);
+}
+
+// ---------- time ----------
+function fastForward(sec){ if(!S.running) return; S.t+=sec; computeVitals(); }
+
+// ---------- end ----------
+function endGame(win){
+  if(S.ended) return; S.ended=true; S.running=false;
+  setTimeout(function(){ showDebrief(win); }, 1400);
+}
+function fmt(t){ var m=Math.floor(t/60), s=Math.floor(t%60); return (m<10?'0':'')+m+':'+(s<10?'0':'')+s; }
+function showDebrief(win){
+  var checks=[];
+  checks.push({pass:S.aspirin && S.aspirinT!==null, t:'Recognized the MI and gave aspirin early', ev: S.aspirin?('at '+fmt(S.aspirinT)):'never given'});
+  checks.push({pass:S.help && S.helpT!==null && S.helpT < S.arrestT+0.1 || (S.help && S.arrestT===0), t:'Called for help before the arrest', ev: S.help?('paged at '+fmt(S.helpT)):'never called'});
+  var cprFast = S.cprStartedT!==null && (S.cprStartedT - S.arrestT) <= 15;
+  checks.push({pass:cprFast, t:'Started CPR within 15s of the arrest', ev: S.cprStartedT!==null?((Math.round(S.cprStartedT-S.arrestT))+'s after collapse'):'CPR never started'});
+  checks.push({pass:S.shocks>=1, t:'Defibrillated the shockable rhythm', ev: S.shocks>0?(S.shocks+' shock'+(S.shocks>1?'s':'')):'never shocked'});
+  checks.push({pass:S.o2, t:'Supported oxygenation', ev: S.o2?'high-flow O₂ applied':'no oxygen'});
+  var passed=0; checks.forEach(function(c){ if(c.pass) passed++; });
+
+  document.getElementById('gate').classList.add('hidden');
+  var db=document.getElementById('debrief'); db.classList.remove('hidden');
+  var v=document.getElementById('verdict');
+  v.textContent = win ? 'ROSC — he survives to the cath lab.' : 'The patient did not survive.';
+  v.className = 'verdict '+(win?'win':'loss');
+  document.getElementById('scoreline').textContent = passed+' of '+checks.length+' key actions · time of arrest '+(S.arrestT?fmt(S.arrestT):'—');
+  var ul=document.getElementById('checks'); ul.innerHTML='';
+  checks.forEach(function(c){
+    var li=document.createElement('li'); li.className=c.pass?'pass':'fail';
+    li.innerHTML='<span class="mk">'+(c.pass?'✓':'✕')+'</span><span class="d"><b>'+c.t+'</b> — '+c.ev+'</span>';
+    ul.appendChild(li);
+  });
+}
+
+// ---------- scene rendering (2D canvas, no WebGL) ----------
+var scene=document.getElementById('scene'), sctx=scene.getContext('2d');
+var ecg=document.getElementById('ecg'), ectx=ecg.getContext('2d');
+var dpr=Math.min(window.devicePixelRatio||1,2), reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
+var flashT=0;
+function flash(){ flashT=0.5; }
+function fit(cv){ var r=cv.getBoundingClientRect(); cv.width=Math.max(1,r.width*dpr); cv.height=Math.max(1,r.height*dpr); }
+function resize(){ fit(scene); fit(ecg); }
+addEventListener('resize', resize);
+
+function drawScene(now){
+  var W=scene.width, H=scene.height, ctx=sctx;
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,W,H);
+  // night-shift room
+  var g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#0c1218'); g.addColorStop(0.55,'#0a0f14'); g.addColorStop(1,'#070a0d');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // soft overhead pool of light
+  var cx=W*0.42, cy=H*0.34;
+  var rg=ctx.createRadialGradient(cx,cy,10,cx,cy,W*0.5);
+  rg.addColorStop(0,'rgba(150,190,230,0.10)'); rg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=rg; ctx.fillRect(0,0,W,H);
+  // floor line
+  ctx.strokeStyle='rgba(160,190,200,0.08)'; ctx.lineWidth=1*dpr;
+  ctx.beginPath(); ctx.moveTo(0,H*0.72); ctx.lineTo(W,H*0.72); ctx.stroke();
+
+  // ---- bed (simple perspective) ----
+  var bx=W*0.12, by=H*0.5, bw=W*0.66, bh=H*0.2;
+  // bed frame
+  ctx.fillStyle='#1a222b'; roundRect(ctx,bx,by+bh*0.55,bw,bh*0.5,8*dpr); ctx.fill();
+  ctx.fillStyle='#0f151b'; ctx.fillRect(bx,by+bh*1.0,10*dpr,H*0.16); ctx.fillRect(bx+bw-10*dpr,by+bh*1.0,10*dpr,H*0.16);
+  // mattress
+  ctx.fillStyle='#20303d'; roundRect(ctx,bx,by,bw,bh*0.7,10*dpr); ctx.fill();
+  // pillow
+  ctx.fillStyle='#33465a'; roundRect(ctx,bx+bw-bw*0.2,by-bh*0.12,bw*0.19,bh*0.42,10*dpr); ctx.fill();
+
+  // ---- patient ----
+  var dead = (S.phase==='dead');
+  var arrest=(S.phase==='arrest');
+  // breathing
+  var breath = 0;
+  if(S.running && !arrest && !dead && !reduce){ breath = Math.sin(now/1000 * (V.rr/60) * Math.PI*2) * (bh*0.03); }
+  // skin tint from SpO2
+  var s = clamp((V.spo2-70)/25,0,1); // 0 cyanotic .. 1 pink
+  var skin = dead ? 'rgb(120,124,130)' : 'rgb('+Math.round(150+70*s)+','+Math.round(120+70*s)+','+Math.round(120+60*s)+')';
+  var hy = by + bh*0.14;           // head baseline y
+  var hx = bx + bw - bw*0.13;      // head near pillow (right side)
+  // blanket over body
+  ctx.fillStyle='#26414e';
+  roundRect(ctx, bx+bw*0.06, by+bh*0.02 - breath, bw*0.66, bh*0.6+breath, 12*dpr); ctx.fill();
+  // chest highlight (rises with breath); CPR = quick pushes
+  var cprPush=0;
+  if(arrest && S.cpr && !reduce){ cprPush = Math.abs(Math.sin(now/1000*1.83*Math.PI*2))*bh*0.06; }
+  ctx.fillStyle='rgba(255,255,255,0.04)';
+  roundRect(ctx, bx+bw*0.30, by+bh*0.06 - breath + cprPush, bw*0.24, bh*0.28, 10*dpr); ctx.fill();
+  // head
+  ctx.beginPath(); ctx.fillStyle=skin;
+  ctx.ellipse(hx, hy, bh*0.19, bh*0.24, 0, 0, Math.PI*2); ctx.fill();
+  // hair/brow
+  ctx.fillStyle='rgba(20,26,32,0.6)';
+  ctx.beginPath(); ctx.ellipse(hx, hy-bh*0.12, bh*0.19, bh*0.10, 0, Math.PI, 0); ctx.fill();
+  // diaphoresis sheen when ischemic & stressed
+  if(S.phase==='ischemia' && S.running){
+    ctx.fillStyle='rgba(180,220,255,0.16)';
+    ctx.beginPath(); ctx.ellipse(hx-bh*0.05, hy-bh*0.02, bh*0.05, bh*0.04, 0,0,Math.PI*2); ctx.fill();
+  }
+  // eyes (open when conscious, closed X-ish when arrest/dead)
+  ctx.strokeStyle='rgba(20,25,30,0.8)'; ctx.lineWidth=2*dpr;
+  if(arrest||dead){
+    line(ctx, hx-bh*0.09,hy-bh*0.01, hx-bh*0.03,hy-bh*0.01);
+    line(ctx, hx+bh*0.03,hy-bh*0.01, hx+bh*0.09,hy-bh*0.01);
+  } else {
+    dot(ctx,hx-bh*0.06,hy-bh*0.01,2*dpr); dot(ctx,hx+bh*0.06,hy-bh*0.01,2*dpr);
+  }
+  // IV pole
+  ctx.strokeStyle='rgba(160,190,200,0.25)'; ctx.lineWidth=3*dpr;
+  line(ctx, bx-W*0.03, by-H*0.28, bx-W*0.03, by+bh*0.9);
+  ctx.fillStyle='rgba(124,199,255,0.5)'; roundRect(ctx, bx-W*0.048, by-H*0.28, W*0.03, H*0.06, 3*dpr); ctx.fill();
+
+  // clinician silhouette doing CPR (only in arrest+cpr)
+  if(arrest && S.cpr){
+    ctx.fillStyle='rgba(20,28,36,0.9)';
+    var px=bx+bw*0.40, py=by-bh*0.35 - cprPush;
+    ctx.beginPath(); ctx.ellipse(px,py,bh*0.13,bh*0.16,0,0,Math.PI*2); ctx.fill();     // head
+    roundRect(ctx, px-bh*0.14, py+bh*0.1, bh*0.28, bh*0.5, 8*dpr); ctx.fill();          // torso
+  }
+
+  // defib flash
+  if(flashT>0){ ctx.fillStyle='rgba(120,255,190,'+(flashT*0.5)+')'; ctx.fillRect(0,0,W,H); flashT-=0.03; }
+
+  // status vignette when dead
+  if(dead){ ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(0,0,W,H); }
+}
+function drawEcg(now){
+  var W=ecg.width,H=ecg.height,ctx=ectx; ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,W,H);
+  var mid=H*0.55, amp=H*0.34, col=S.phase==='ischemia'?'#37e08b':(S.phase==='rosc'?'#37e08b':(S.phase==='arrest'?'#ff5a52':'#5b6a72'));
+  ctx.strokeStyle=col; ctx.lineWidth=2*dpr; ctx.beginPath();
+  var phase = reduce?0:(now/1000);
+  for(var x=0;x<=W;x+=2){
+    var u=x/W, y=mid;
+    if(S.phase==='dead'){ y=mid; }
+    else if(S.phase==='arrest'){ // VF: noisy
+      var n=Math.sin((u*40)+phase*7)*0.5 + Math.sin((u*97)+phase*13)*0.3 + Math.sin((u*23)-phase*5)*0.4;
+      y=mid - n*amp*0.7;
+    } else { // sinus, rate scales spacing
+      var beats = clamp(V.hr/20, 3, 9);
+      var local = ((u*beats) - phase*(V.hr/60));
+      var fp = local - Math.floor(local);
+      y = mid - beatWave(fp)*amp;
+    }
+    if(x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+function beatWave(p){
+  function g(c,w,a){ var d=(p-c)/w; return a*Math.exp(-d*d*0.5); }
+  return g(0.30,0.008,1.0)+g(0.28,0.010,-0.18)+g(0.325,0.010,-0.28)+g(0.52,0.045,0.28)+g(0.16,0.020,0.10);
+}
+// helpers
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function line(ctx,a,b,c,d){ ctx.beginPath(); ctx.moveTo(a,b); ctx.lineTo(c,d); ctx.stroke(); }
+function dot(ctx,x,y,r){ ctx.fillStyle='rgba(20,25,30,0.85)'; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill(); }
+
+// ---------- monitor DOM ----------
+function num(id,val){ document.getElementById(id).textContent=val; }
+function tone(id,val,warnLo,warnHi,critLo,critHi){
+  var el=document.getElementById(id); el.classList.remove('warn','crit');
+  if(val<=critLo||val>=critHi) el.classList.add('crit');
+  else if(val<=warnLo||val>=warnHi) el.classList.add('warn');
+}
+function refreshMonitor(){
+  if(!S.running && !S.ended){ return; }
+  num('n-hr', S.phase==='ischemia'||S.phase==='rosc'?V.hr:'0');
+  num('n-bp', (V.sbp>0)?(V.sbp+'/'+V.dbp):'--/--');
+  num('n-spo2', V.spo2>0?V.spo2:'--');
+  num('n-rr', V.rr>0?V.rr:'0');
+  tone('v-hr', V.hr, 60,110, 40,140);
+  tone('v-spo2', V.spo2, 92,101, 88,101);
+  tone('v-bp', V.sbp, 95,160, 85,200);
+  tone('v-rr', V.rr, 12,22, 8,30);
+  var cl=document.getElementById('clock'); cl.textContent=fmt(S.t);
+  cl.className='clock'+((S.phase==='arrest')?' crit':'');
+}
+
+// ---------- loop ----------
+var last=null;
+function frame(now){
+  if(last===null) last=now;
+  var dt=Math.min((now-last)/1000, 0.1); last=now;
+  if(S.running){ S.t += dt; computeVitals(); }
+  drawScene(now); drawEcg(now); refreshMonitor();
+  requestAnimationFrame(frame);
+}
+
+// ---------- wiring ----------
+function begin(){
+  document.getElementById('gate').classList.add('hidden');
+  S.running=true; S.t=0; computeVitals();
+  say('sys','MONITOR','His monitor is alarming. He looks frightened. You have the room to yourself.');
+}
+document.getElementById('beginBtn').addEventListener('click', begin);
+document.getElementById('againBtn').addEventListener('click', function(){ location.reload(); });
+document.getElementById('fullBtn').addEventListener('click', function(){ location.href='hub.html'; });
+document.getElementById('bar').addEventListener('click', function(e){
+  var b=e.target.closest('button.act'); if(!b) return; actions(b.getAttribute('data-a'));
+});
+resize(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
