@@ -1,64 +1,47 @@
-# Early Recognition Trainer
+# Early Recognition Trainer — Next.js + react-three-fiber + WebXR
 
-> **Educational simulation for training purposes only. Not medical advice, not a medical device, and not for clinical decision-making.**
+A refactor of the single-file trainer into a proper JavaScript project so assets can be
+optimized, code split, and API keys hidden server-side. Lives on the branch
+**`refactor-nextjs-r3f`**; `main` still holds the working single-file build.
 
-A browser-based simulation that trains nurses to **notice patient deterioration early** — including a voice-commanded VR mode that runs in the Meta Quest browser with no app install.
+## Stack
+- **Next.js 14 (App Router) + React 18 + TypeScript**
+- **react-three-fiber** (three.js in React) + **@react-three/xr** (WebXR: VR button, controllers)
+- **Vercel** for hosting (auto-deploy on push)
 
-**[▶ Open the simulation](https://teteiwuala.github.io/early-recognition-trainer/)**
+## Project layout
+```
+app/
+  layout.tsx        root HTML shell + metadata
+  page.tsx          client entry; loads <Sim/> with SSR disabled (WebGL needs the browser)
+  globals.css       theme tokens
+components/
+  Sim.tsx           the <Canvas> + <XR> + Enter-VR button + HTML HUD (SBAR, vitals, actions, debrief)
+  WardScene.tsx     the 3D ward: room, bed, patient, live monitor, beating heart, pointable buttons
+lib/
+  engine.ts         the sim engine (MI -> VF arrest), framework-agnostic — ported from the single file
+  scenario.ts       case text + the Dr. Okafor voice persona/prompt
+```
 
-## The problem it targets
+## Run locally (needs Node 18+ installed)
+```bash
+npm install
+npm run dev          # http://localhost:3000
+```
+> Node was NOT available in the environment this scaffold was authored in, so it has not
+> been built locally. The first real build happens on Vercel. `next.config.mjs` sets
+> `ignoreBuildErrors`/`ignoreDuringBuilds` so a stray type/lint issue won't block that first
+> deploy — turn those off once it's green and you have Node locally.
 
-The deadliest failure in acute care isn't a lack of knowledge — it's *failure to rescue*. Patients who deteriorate rarely do so without warning; the signs are usually present well beforehand. A climbing respiratory rate, subtle mottling, a patient who is "just a bit off." Nurses learn what these mean. The ones who miss them didn't fail a knowledge test — they didn't look.
+## Deploy to Vercel (steps)
+1. Go to **vercel.com** → sign in **with GitHub**.
+2. **Add New… → Project** → **Import** the `teteiwuala/ert` repo.
+3. Framework preset auto-detects **Next.js** — leave build settings default.
+4. Under **Git branch**, pick **`refactor-nextjs-r3f`** (so `main`'s static site is untouched).
+5. **Deploy.** You get a free `*.vercel.app` URL; every push to that branch redeploys.
 
-Most clinical e-learning tests recall. This trains and **measures noticing**.
-
-## How it teaches
-
-Built on Tanner's Clinical Judgment Model (Notice → Interpret → Respond → Reflect), the framework behind the NCSBN Clinical Judgment Measurement Model used by the Next Gen NCLEX.
-
-- **Looking is a choice.** The vitals monitor is blank until you tap it, and re-masks after four seconds. Attention is logged, never assumed.
-- **Nothing announces itself.** Cues appear silently on a schedule that varies slightly every run, so a case can't be beaten by memorising the clock.
-- **Reasoning is captured, not inferred.** Scheduled reflection check-ins ask what you notice, what it might mean, and what you'll do — deliberately timed away from cue onsets so a prompt never doubles as an alert.
-- **The debrief is the product.** A four-track timeline (Cues / Attention / Actions / Reasoning) on one shared axis makes the gap between *visible* and *seen* impossible to miss, alongside two computed scores — **Time-to-Recognition** and **Cue Latency** (how long the earliest sign was on the monitor before you looked) — and coaching generated from your own session log.
-- **It won't flatter you.** The debrief never claims a cue appeared if the run ended first, and escalating before any sign exists is named as a false alarm rather than praised as good instincts.
-
-## Cases
-
-| Case | Setting | What it teaches |
-|---|---|---|
-| **Quiet Decline** | Surgical ward, post-op day 1 | The core case: sepsis with a rising respiratory rate as the earliest sign |
-| **Three Hours Out** *(draft)* | Remote nursing station, no physician on site | The decision clock is **transport** time — escalating early on suggestive findings is correct when the aircraft is hours away |
-| **Sugar Crash** *(draft)* | Medical ward, morning round | The key finding is only visible if you think to run a test |
-| **Steady Ken** *(draft)* | Surgical ward, pre-discharge | A control case: the patient is fine, and escalating is the *wrong* answer |
-
-Cases marked *draft* are awaiting review by a practising nurse educator. Corrections are welcome and wanted — see below.
-
-## VR mode (Meta Quest)
-
-Open the simulation in the Quest browser and press **Enter VR**. No app store, no developer account, no install — WebXR runs directly in the browser.
-
-In VR you can **speak to the instructor** instead of using controls: *"check his BP"*, *"talk to him"*, *"what have we got in here?"* Interventions require a spoken reason — say *"give him fluids"* and it asks why; say *"give him fluids because his pulse is fading and his palms are sweaty"* and it acts, recording your reasoning to the debrief. Acting for a reason you can state out loud is the difference between judgment and guessing, and it's the whole point.
-
-Voice needs a microphone and an internet connection. Everything else works offline.
-
-## Files
-
-| File | What it is |
-|---|---|
-| `nurse-sepsis-trainer.html` | The 2D simulation — four cases, briefings, full debrief |
-| `nurse-sim-3d.html` | 3D / WebXR version with voice commands |
-| `instructor-dashboard.html` | Educator analytics — load exported sessions for class-wide views |
-
-Every file is self-contained: open it directly and it runs. No build step, no server, no accounts, no dependencies to install.
-
-## Privacy
-
-**No student data leaves the machine.** There is no server and no telemetry. Sessions export to a local JSON file the educator keeps, and the dashboard reads those files in the browser. Class codes group sessions for convenience — they are labels, not access control. The optional VR voice feature streams microphone audio to a third-party service and is off unless explicitly enabled.
-
-## For nurse educators
-
-Feedback is the thing this project needs most. If you teach nursing and something here is clinically wrong, imprecise, or pedagogically naive, please open an issue — that's more valuable than any feature request.
-
-## License
-
-MIT — see [`LICENSE`](LICENSE). Provided "as is", without warranty of any kind. The disclaimer at the top of this file applies to every part of this project.
+## Roadmap (not in this scaffold yet)
+- **Voice (Dr. Okafor):** add a Next API route to mint an ElevenLabs signed URL server-side,
+  then connect from the client — keeps the key off the browser.
+- **AI patient:** a `/api/patient` route proxying Anthropic so the key stays server-side.
+- **Asset optimization:** Draco-compress the `.glb` models and lazy-load via drei `useGLTF`.
