@@ -10785,7 +10785,23 @@ if (typeof window !== 'undefined') {
   // must include every origin this page is served from — localhost,
   // https://teteiwuala.github.io, and the LAN IP used for headset testing —
   // or the WebSocket handshake is refused.
-  const AGENT_ID = 'agent_4701kz3zcrh0f5rrg9wkbradzt45';
+  // Two personas share this bridge; the WS protocol and tool routing are
+  // identical, only the platform-side agent config differs:
+  //   - PATIENT (default): "Maya" on the repurposed second-account Friday
+  //     agent — speaks as the deteriorating patient. Setup + prompt live in
+  //     nurse-sim-docs/patient-voice-agent.md.
+  //   - DOCTOR: Dr. Okafor, the Socratic attending coach (shared with
+  //     nurse-sim-3d.html — never repurpose). Select with ?agent=doctor.
+  // Any other ?agent=<id> value connects verbatim (headset testing without a
+  // redeploy).
+  const DOCTOR_AGENT_ID = 'agent_4701kz3zcrh0f5rrg9wkbradzt45';
+  const PATIENT_AGENT_ID = 'agent_4501ky4yzv8efcdr4ywcwvbp7sbv';
+  const AGENT_PARAM = (function () {
+    try { return new URLSearchParams(location.search).get('agent') || ''; }
+    catch (e) { return ''; }
+  })();
+  const AGENT_ID = AGENT_PARAM === 'doctor' ? DOCTOR_AGENT_ID
+                 : (AGENT_PARAM || PATIENT_AGENT_ID);
   const WS_URL = 'wss://api.elevenlabs.io/v1/convai/conversation?agent_id=' + AGENT_ID;
   const TARGET_RATE = 16000;          // pcm_16000 both directions
   const SEND_EVERY_SAMPLES = 1600;    // ~100 ms of 16 kHz mono
