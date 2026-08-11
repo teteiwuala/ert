@@ -1,0 +1,10 @@
+:root {
+  --bg: #0a0d10; --panel: #12171c; --ink: #e9eef1; --muted: #8a9aa3; --faint: #5b6a72;
+  --line: rgba(160, 190, 200, 0.16); --line-strong: rgba(160, 190, 200, 0.28);
+  --ecg: #37e08b; --amber: #f0b429; --red: #ff5a52; --blue: #7cc7ff; --violet: #c9a0ff;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, "Cascadia Mono", "Courier New", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--sans); overflow: hidden; }
+button { font-family: var(--mono); cursor: pointer; }
