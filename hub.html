@@ -4432,6 +4432,52 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // click, so start() runs inside the user gesture as Web Audio requires.
     if (window.WardAudio) { try { window.WardAudio.start(); } catch (err) {} }
   });
+  // Floating action feedback: every bedside action spawns a label + pulse ring
+  // at the touched body part, so EVERY menu option lands visibly in the scene.
+  const ZONE_POS = {
+    chest: { x: -0.4,  y: 0.95, z: -1.75 }, head:  { x: -0.4,  y: 0.98, z: -2.15 },
+    wrist: { x: -0.12, y: 0.90, z: -1.35 }, arm:   { x: -0.68, y: 0.90, z: -1.60 },
+    legs:  { x: -0.4,  y: 0.92, z: -0.95 }
+  };
+  const actionFlashes = [];
+  window.addEventListener('sim-flash', function (e) {
+    if (!ward || !e.detail) return;
+    const d = e.detail, pos = ZONE_POS[d.zoneId] || ZONE_POS.chest;
+    try {
+      const c = document.createElement('canvas'); c.width = 512; c.height = 96;
+      const x = c.getContext('2d');
+      x.fillStyle = 'rgba(3,14,20,0.72)'; x.fillRect(0, 14, 512, 68);
+      x.strokeStyle = '#00e5ff'; x.lineWidth = 3; x.strokeRect(2, 16, 508, 64);
+      x.fillStyle = '#bffaff'; x.font = '600 30px "Courier New",monospace'; x.textAlign = 'center';
+      x.fillText(String(d.text || '').slice(0, 34), 256, 58);
+      const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+      const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+      spr.scale.set(0.85, 0.16, 1); spr.position.set(pos.x, pos.y, pos.z);
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.07, 32),
+        new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.85,
+          side: THREE.DoubleSide, depthWrite: false }));
+      ring.rotation.x = -Math.PI / 2; ring.position.set(pos.x, pos.y - 0.16, pos.z);
+      scene.add(spr); scene.add(ring);
+      actionFlashes.push({ spr: spr, ring: ring, t: 0 });
+    } catch (err) {}
+  });
+  function updateActionFlashes(dt) {
+    for (let i = actionFlashes.length - 1; i >= 0; i--) {
+      const f = actionFlashes[i]; f.t += dt;
+      const k = f.t / 1.8;
+      f.spr.position.y += dt * 0.16;
+      f.spr.material.opacity = Math.max(0, 1 - k);
+      const rs = 1 + k * 3.2;
+      f.ring.scale.set(rs, rs, rs);
+      f.ring.material.opacity = Math.max(0, 0.85 * (1 - k * 1.4));
+      if (k >= 1) {
+        scene.remove(f.spr); scene.remove(f.ring);
+        try { f.spr.material.map.dispose(); f.spr.material.dispose(); f.ring.geometry.dispose(); f.ring.material.dispose(); } catch (err) {}
+        actionFlashes.splice(i, 1);
+      }
+    }
+  }
+
   window.addEventListener('sim-heart-show', function () {
     if (!heartViz && typeof window.makeHeartViz === 'function') {
       try { heartViz = window.makeHeartViz(THREE, scene, { camera: camera }); } catch (err) {}
@@ -4543,6 +4589,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (pInteract) pInteract.update(dt);
     if (vrui) vrui.update(dt);
     if (heartViz) heartViz.update(dt, now);
+    updateActionFlashes(dt);
     if (ward && latestVitals) ward.update(latestVitals, dt);
     if (wardFx) wardFx.update(dt, now);
     if (vitalsMon && latestVitals) vitalsMon.update(latestVitals, now);
@@ -6647,9 +6694,11 @@ if (typeof window !== 'undefined') {
     if (/^assess-/.test(maps)) {
       var reading = quickAssess(d.zoneId, maps.replace('assess-', ''));
       appendLog('cue', d.label + ': ' + reading);
+      emit('sim-flash', { zoneId: d.zoneId, text: reading });
       if (window.DoctorLink) window.DoctorLink.event('Trainee checked ' + d.label + ' — finding: ' + reading);
     } else {
       appendLog('you', d.label + ' (bedside)');
+      emit('sim-flash', { zoneId: d.zoneId, text: d.label });
       visualsFor(maps + ' ' + d.label);
       Promise.resolve(PatientLoop.sendCommand(maps)).catch(function () {});
     }
