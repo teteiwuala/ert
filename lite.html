@@ -51,7 +51,19 @@
   .msg.pt{border-left-color:var(--ecg)} .msg.pt .who{color:var(--ecg)}
   .msg.sys{border-left-color:var(--amber)} .msg.sys .who{color:var(--amber)}
   .msg.bad{border-left-color:var(--red)} .msg.bad .who{color:var(--red)}
+  .msg.doctor{border-left-color:#c9a0ff} .msg.doctor .who{color:#c9a0ff}
   @keyframes rise{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
+
+  /* mic / Dr. Okafor voice pill */
+  .topright{display:flex; align-items:center; gap:12px}
+  .mic{display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:10.5px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); cursor:pointer; border:1px solid var(--line-strong);
+    border-radius:20px; padding:6px 12px; background:rgba(255,255,255,.03); user-select:none}
+  .mic .d2{width:8px; height:8px; border-radius:50%; background:var(--faint); flex:0 0 auto}
+  .mic.listening{color:var(--ecg); border-color:rgba(55,224,139,.5)} .mic.listening .d2{background:var(--ecg); box-shadow:0 0 8px var(--ecg); animation:blip 1.4s infinite}
+  .mic.speaking{color:#c9a0ff; border-color:rgba(201,160,255,.5)} .mic.speaking .d2{background:#c9a0ff; box-shadow:0 0 8px #c9a0ff}
+  .mic.error{color:var(--red); border-color:rgba(255,90,82,.5)} .mic.error .d2{background:var(--red)}
+  @keyframes blip{0%,100%{opacity:.4}50%{opacity:1}}
 
   /* action bar */
   .bar{flex:0 0 auto; border-top:1px solid var(--line); background:linear-gradient(0deg,var(--panel),var(--panel-2));
@@ -104,7 +116,10 @@
 <div id="app">
   <div class="top">
     <div class="brand"><b>Code in Bay&nbsp;2</b> · Early Recognition Trainer</div>
-    <div class="clock" id="clock">00:00</div>
+    <div class="topright">
+      <div class="mic" id="mic" title="Talk to Dr. Okafor hands-free"><span class="d2"></span><span id="micLabel">Tap to talk</span></div>
+      <div class="clock" id="clock">00:00</div>
+    </div>
   </div>
 
   <div class="stage">
@@ -139,8 +154,9 @@
           <li><b>Intervene</b> when you've reasoned it through. Timing is scored.</li>
           <li>If he arrests, <b>run the code</b> — recognize it, call it, and act.</li>
         </ul>
-        <button class="go" id="beginBtn">▶ Begin the shift</button>
-        <p class="note">Training simulation only — not medical advice. Clinical content is a draft pending nurse-educator review.</p>
+        <p class="sbar" style="border-top:1px solid var(--line); padding-top:12px"><span class="tag" style="color:#c9a0ff">🎤 VOICE</span> &nbsp;When you tap Begin, <b>Dr. Okafor</b> (the attending) will brief you out loud and then you can just <b>talk to him hands-free</b> — no buttons needed. <b>Allow the microphone</b> when your browser asks.</p>
+        <button class="go" id="beginBtn">▶ Begin the shift &amp; allow mic</button>
+        <p class="note">Training simulation only — not medical advice. Clinical content is a draft pending nurse-educator review. The buttons still work if you'd rather not use voice.</p>
       </div>
     </div>
 
@@ -204,6 +220,461 @@ window.addEventListener('error', function(ev){
     b.textContent='⚠ '+(ev.message||'error')+'  ('+(ev.filename||'')+':'+(ev.lineno||'?')+')';
   } catch(e){}
 });
+</script>
+<script>
+/* =====================================================================
+   VOICE BRIDGE — hands-free command input for the nurse VR hub
+   ---------------------------------------------------------------------
+   Ported from the VoiceCommand module in nurse-sim-3d.html (the ElevenLabs
+   Conversational AI raw-WebSocket client that sat between the engine
+   modules and Module 3). Same protocol, same audio pipeline; the sim
+   surface is different — instead of calling sim verbs directly, every
+   agent tool call is composed into ONE natural-language order string
+   (action + ' because ' + rationale) and handed to opts.onCommand(text),
+   ready to feed the hub's command box. Reasoning-before-action is the
+   app's thesis: the agent is configured to refuse interventions until
+   the trainee has said WHY, so `rationale` is always their own words.
+
+   WHY RAW WEBSOCKET, NOT THE SDK: the protocol is small and documented,
+   and a bundled SDK risks a literal end-of-script sequence terminating an
+   inline script. Nothing here needs a build step and nothing is fetched
+   at runtime except the socket.
+
+   WHY STREAMED AUDIO, NOT SpeechRecognition: the Quest browser does not
+   implement the Web Speech API's SpeechRecognition at all. Microphone
+   PCM is captured and streamed instead. Do NOT "simplify" this back to
+   SpeechRecognition — it would silently never fire in the headset.
+
+   NO SECRET LIVES HERE. The agent accepts unauthenticated sessions, so
+   the page needs only its public id.
+
+   API (window.VoiceBridge):
+     init({ onCommand(text) REQUIRED,
+            onStatus(state)     optional — 'idle'|'connecting'|'listening'|'agent-speaking'|'error',
+            onTranscript(who,t) optional — who is 'you'|'agent' })
+     start() -> Promise   (call from a click — getUserMedia gesture rule)
+     stop()  -> Promise   (tears down mic + WS cleanly)
+     toggle()
+     isActive() -> boolean
+     registerTool(name, handler) -> boolean   (add/override a client tool)
+     sendContext(text) -> boolean             (contextual_update client event)
+   Also listens for CustomEvent 'sim-voice-toggle' on window -> toggle().
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  // The agent lives in the Bluedrop workspace ElevenLabs account. Its
+  // origin allowlist ("Allowed origins" in the agent's Security settings)
+  // must include every origin this page is served from — localhost,
+  // https://teteiwuala.github.io, and the LAN IP used for headset testing —
+  // or the WebSocket handshake is refused.
+  const AGENT_ID = 'agent_4701kz3zcrh0f5rrg9wkbradzt45';
+  const WS_URL = 'wss://api.elevenlabs.io/v1/convai/conversation?agent_id=' + AGENT_ID;
+  const TARGET_RATE = 16000;          // pcm_16000 both directions
+  const SEND_EVERY_SAMPLES = 1600;    // ~100 ms of 16 kHz mono
+
+  let ws = null, ac = null, micStream = null, micNode = null, srcNode = null;
+  let state = 'idle';                 // idle | connecting | listening | agent-speaking | error
+  let pending = [];                   // Float32 mic samples awaiting a send
+  let playCursor = 0, liveSources = [];
+  let reportedFailure = false;        // "report once, don't spam"
+  let stopping = false;
+  let startPromise = null;            // double-connect guard: concurrent start() shares one attempt
+  let inited = false;
+
+  // ---- callbacks (wired by init) ----------------------------------------
+  let cb = {
+    onCommand: function () {},
+    onStatus: function () {},
+    onTranscript: function () {},
+  };
+
+  function setState(s) {
+    if (state === s) return;
+    state = s;
+    try { cb.onStatus(s); } catch (e) {}
+  }
+
+  // Surface a failure exactly once per session; never throw.
+  function fail(msg) {
+    setState('error');
+    if (reportedFailure) return;
+    reportedFailure = true;
+    console.warn('[VoiceBridge] ' + msg + ' The on-screen controls still work.');
+  }
+
+  function emitTranscript(who, text) {
+    try { cb.onTranscript(who, text); } catch (e) {}
+  }
+
+  // ---- tool calls -> one natural-language order --------------------------
+  // The agent's tool definitions (JSON-Schema parameters, including the
+  // required `rationale` on interventions) live in the platform agent
+  // config — the empty conversation_initiation_client_data below means that
+  // config is used verbatim. Here every call is flattened into the order
+  // string the hub's command box expects.
+  function compose(action, rationale) {
+    const a = String(action || '').trim();
+    const r = String(rationale || '').trim();
+    if (!a) return '';
+    return r ? a + ' because ' + r : a;
+  }
+
+  function issueOrder(action, rationale, ack) {
+    const text = compose(action, rationale);
+    if (!text) return 'I did not catch an action to carry out.';
+    try { cb.onCommand(text); } catch (e) {
+      console.warn('[VoiceBridge] onCommand handler threw:', e);
+    }
+    return ack || 'Order sent to the simulation.';
+  }
+
+  // Named tools mirror the sim-3d agent's configured tool set, plus a
+  // generic issue_order/sim_command for a hub-side agent config. Adding a
+  // tool here is safe; the agent only calls what its platform config lists.
+  const TOOLS = {
+    // Generic: agent extracts {action, rationale} from the nurse's speech.
+    issue_order: async (p) => issueOrder(p && p.action, p && p.rationale),
+    sim_command: async (p) => issueOrder(p && p.action, p && p.rationale),
+
+    // Assessments (no rationale required — looking is always allowed).
+    check_vitals:    async () => issueOrder('check vitals', '', 'Checking vitals now.'),
+    talk_to_patient: async () => issueOrder('talk to the patient', '', 'Talking to the patient.'),
+    check_skin:      async () => issueOrder('check the skin and IV site', '', 'Checking the skin.'),
+    scan_area:       async (p) => issueOrder(
+      'look around' + (p && p.looking_for ? ' for ' + p.looking_for : ''), '',
+      'Scanning the area.'),
+
+    // Interventions: the agent will not call these until the trainee has
+    // said WHY, so `rationale` is always their own words.
+    give_fluids: async (p) => issueOrder('give IV fluids', p && p.rationale, 'Fluids ordered.'),
+    escalate:    async (p) => issueOrder('call for help', p && p.rationale, 'Calling for help now.'),
+
+    // Thinking aloud: forward the reasoning as an order-shaped note so the
+    // sim's log still captures it.
+    record_reasoning: async (p) => {
+      const notice = (p && p.notice) || '';
+      const interpret = (p && p.interpret) || '';
+      const parts = [notice, interpret].filter(Boolean).join(' — ');
+      if (parts) issueOrder('note: ' + parts, '', '');
+      return '';
+    },
+
+    spawn_item: async (p) => issueOrder(
+      'get ' + ((p && p.item) || 'equipment'), p && p.rationale, 'Asked for it.'),
+  };
+
+  // Generic extension points (used by e.g. window.DoctorLink) ---------------
+  // registerTool: add or override a client tool handler at runtime. The agent
+  // still only calls tools its platform config lists; this just decides what
+  // happens sim-side when it does. handler(params) may return a string (sent
+  // back as the tool result) or a Promise of one.
+  function registerTool(name, handler) {
+    if (!name || typeof handler !== 'function') {
+      console.warn('[VoiceBridge] registerTool: need a name and a function.');
+      return false;
+    }
+    TOOLS[String(name)] = handler;
+    return true;
+  }
+
+  // sendContext: push a contextual update to the live conversation (the
+  // ElevenLabs "contextual_update" client event — informs the agent without
+  // taking a turn). No-op (returns false) when the socket is not open.
+  function sendContext(text) {
+    const t = String(text == null ? '' : text).trim();
+    if (!t || !ws || ws.readyState !== 1) return false;
+    try {
+      ws.send(JSON.stringify({ type: 'contextual_update', text: t }));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ---- audio: base64 <-> PCM (ported verbatim) ---------------------------
+  function b64ToInt16(b64) {
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
+  }
+  function int16ToB64(i16) {
+    const bytes = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  }
+
+  // Linear resample to 16 kHz. If the AudioContext honoured our 16 kHz
+  // request this is a straight pass-through.
+  function toTargetRate(f32, fromRate) {
+    if (fromRate === TARGET_RATE) return f32;
+    const ratio = fromRate / TARGET_RATE;
+    const out = new Float32Array(Math.floor(f32.length / ratio));
+    for (let i = 0; i < out.length; i++) {
+      const src = i * ratio, i0 = Math.floor(src), i1 = Math.min(i0 + 1, f32.length - 1);
+      out[i] = f32[i0] + (f32[i1] - f32[i0]) * (src - i0);
+    }
+    return out;
+  }
+
+  // Gap-free sequential playback of agent audio (patient/instructor voice),
+  // with a small lead-in so chunk boundaries don't click.
+  function playChunk(b64) {
+    if (!ac) return;
+    const i16 = b64ToInt16(b64);
+    const f32 = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    const buf = ac.createBuffer(1, f32.length, TARGET_RATE);
+    buf.copyToChannel(f32, 0);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    src.connect(ac.destination);
+    const now = ac.currentTime;
+    if (playCursor < now) playCursor = now + 0.06;
+    src.start(playCursor);
+    playCursor += buf.duration;
+    liveSources.push(src);
+    src.onended = () => {
+      liveSources = liveSources.filter(s => s !== src);
+      if (!liveSources.length && state === 'agent-speaking') setState('listening');
+    };
+    setState('agent-speaking');
+  }
+  function flushPlayback() {                    // barge-in / interruption
+    liveSources.forEach(s => { try { s.stop(); } catch (e) {} });
+    liveSources = [];
+    playCursor = 0;
+    if (state === 'agent-speaking') setState('listening');
+  }
+
+  // ---- mic capture (ported verbatim) -------------------------------------
+  // AudioWorklet is preferred: it runs off the main thread, which matters
+  // because the main thread is also driving a 72 fps XR render loop.
+  // ScriptProcessorNode is the fallback for browsers that refuse the
+  // Blob-URL worklet module.
+  const WORKLET_SRC =
+    'class MicCapture extends AudioWorkletProcessor{' +
+    'process(inputs){const ch=inputs[0]&&inputs[0][0];' +
+    'if(ch&&ch.length)this.port.postMessage(new Float32Array(ch));return true;}}' +
+    "registerProcessor('mic-capture',MicCapture);";
+
+  function pushSamples(f32, rate) {
+    if (!ws || ws.readyState !== 1) return;
+    const res = toTargetRate(f32, rate);
+    pending.push(res);
+    let total = pending.reduce((n, a) => n + a.length, 0);
+    while (total >= SEND_EVERY_SAMPLES) {
+      const merged = new Float32Array(total);
+      let o = 0;
+      pending.forEach(a => { merged.set(a, o); o += a.length; });
+      const take = merged.subarray(0, SEND_EVERY_SAMPLES);
+      const i16 = new Int16Array(take.length);
+      for (let i = 0; i < take.length; i++) {
+        const v = Math.max(-1, Math.min(1, take[i]));
+        i16[i] = v < 0 ? v * 32768 : v * 32767;
+      }
+      try { ws.send(JSON.stringify({ user_audio_chunk: int16ToB64(i16) })); } catch (e) {}
+      const rest = merged.subarray(SEND_EVERY_SAMPLES);
+      pending = rest.length ? [new Float32Array(rest)] : [];
+      total = rest.length;
+    }
+  }
+
+  async function startMic() {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    try { ac = new AudioContext({ sampleRate: TARGET_RATE }); }
+    catch (e) { ac = new AudioContext(); }
+    if (ac.state === 'suspended') await ac.resume();
+    srcNode = ac.createMediaStreamSource(micStream);
+    const rate = ac.sampleRate;
+    let usedWorklet = false;
+    if (ac.audioWorklet) {
+      try {
+        const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+        await ac.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        micNode = new AudioWorkletNode(ac, 'mic-capture');
+        micNode.port.onmessage = (e) => pushSamples(e.data, rate);
+        srcNode.connect(micNode);
+        usedWorklet = true;
+      } catch (e) { usedWorklet = false; }
+    }
+    if (!usedWorklet) {
+      micNode = ac.createScriptProcessor(4096, 1, 1);
+      micNode.onaudioprocess = (e) => pushSamples(new Float32Array(e.inputBuffer.getChannelData(0)), rate);
+      srcNode.connect(micNode);
+      micNode.connect(ac.destination);   // ScriptProcessor needs a sink to pull
+    }
+  }
+
+  // ---- socket message handling (protocol ported verbatim) ----------------
+  function handle(msg) {
+    switch (msg.type) {
+      case 'ping':
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'pong', event_id: msg.ping_event && msg.ping_event.event_id }));
+        }
+        break;
+      case 'audio':
+        if (msg.audio_event && msg.audio_event.audio_base_64) playChunk(msg.audio_event.audio_base_64);
+        break;
+      case 'interruption':
+        flushPlayback();
+        break;
+      case 'agent_response':
+        if (msg.agent_response_event && msg.agent_response_event.agent_response) {
+          emitTranscript('agent', msg.agent_response_event.agent_response);
+        }
+        break;
+      case 'user_transcript':
+        if (msg.user_transcription_event && msg.user_transcription_event.user_transcript) {
+          emitTranscript('you', msg.user_transcription_event.user_transcript);
+        }
+        break;
+      case 'client_tool_call': {
+        const call = msg.client_tool_call || {};
+        const fn = TOOLS[call.tool_name];
+        const wants = call.expects_response !== false;
+        Promise.resolve()
+          .then(() => (fn ? fn(call.parameters || {}) : Promise.reject(new Error('unknown tool'))))
+          .then(result => {
+            if (!wants || !ws || ws.readyState !== 1) return;
+            ws.send(JSON.stringify({
+              type: 'client_tool_result', tool_call_id: call.tool_call_id,
+              result: String(result == null ? '' : result), is_error: false,
+            }));
+          })
+          .catch(err => {
+            if (!wants || !ws || ws.readyState !== 1) return;
+            ws.send(JSON.stringify({
+              type: 'client_tool_result', tool_call_id: call.tool_call_id,
+              result: 'That could not be done: ' + (err && err.message ? err.message : 'unknown'),
+              is_error: true, error_type: 'external_client',
+            }));
+          });
+        break;
+      }
+    }
+  }
+
+  // ---- lifecycle ----------------------------------------------------------
+  async function doStart() {
+    // navigator.onLine is NOT a hard gate: on Linux it often reports offline
+    // while requests succeed (VM NICs, NetworkManager quirks). Attempt the
+    // connection regardless — the socket's own error path reports honestly.
+    if (!window.WebSocket || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      fail('This browser will not give the page a microphone or a WebSocket.');
+      return;
+    }
+    stopping = false;
+    reportedFailure = false;
+    setState('connecting');
+    try {
+      await startMic();                       // ask for the mic first: a refusal here is cheap
+    } catch (e) {
+      fail('Microphone permission was declined.');
+      await teardown();
+      return;
+    }
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      fail('Could not reach the voice agent.');
+      await teardown();
+      return;
+    }
+    ws.onopen = () => {
+      // Send an (empty) initiation so the agent's own configuration is used
+      // verbatim — persona, tools and voice all live on the platform.
+      var __init = { type: 'conversation_initiation_client_data' };
+      if (cb.initOverride) __init.conversation_config_override = cb.initOverride;
+      ws.send(JSON.stringify(__init));
+      setState('listening');
+    };
+    ws.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handle(msg);
+    };
+    ws.onerror = () => { if (!stopping) fail('The connection to the voice agent failed.'); };
+    ws.onclose = () => {
+      if (!stopping && state !== 'error') fail('The voice agent disconnected.');
+      teardown();
+    };
+  }
+
+  async function teardown() {
+    flushPlayback();
+    try { if (micNode) { micNode.disconnect(); micNode.onaudioprocess = null; } } catch (e) {}
+    try { if (srcNode) srcNode.disconnect(); } catch (e) {}
+    try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { if (ac) await ac.close(); } catch (e) {}
+    micNode = srcNode = micStream = ac = null;
+    pending = [];
+    if (state !== 'error') setState('idle');
+  }
+
+  // start(): safe to call from a click handler (the getUserMedia call happens
+  // inside the same task, preserving the user gesture). Never rejects.
+  // Repeated calls while active or mid-connect share the guard and no-op.
+  function start() {
+    if (startPromise) return startPromise;                   // already connecting
+    if (state !== 'idle' && state !== 'error') return Promise.resolve();  // already active
+    startPromise = doStart()
+      .catch(e => { console.warn('[VoiceBridge] start failed:', e); setState('error'); })
+      .finally(() => { startPromise = null; });
+    return startPromise;
+  }
+
+  async function stop() {
+    stopping = true;
+    try { if (ws && ws.readyState <= 1) ws.close(); } catch (e) {}
+    ws = null;
+    await teardown();
+    setState('idle');                    // stop() always lands back at idle, even after an error
+    reportedFailure = false;
+  }
+
+  function isActive() {
+    return state === 'connecting' || state === 'listening' || state === 'agent-speaking';
+  }
+
+  function toggle() {
+    if (isActive()) { stop(); } else { start(); }
+  }
+
+  function init(opts) {
+    opts = opts || {};
+    if (typeof opts.onCommand !== 'function') {
+      console.warn('[VoiceBridge] init: opts.onCommand is required — voice orders will be dropped.');
+    }
+    cb.onCommand = typeof opts.onCommand === 'function' ? opts.onCommand : function () {};
+    cb.onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : function () {};
+    cb.onTranscript = typeof opts.onTranscript === 'function' ? opts.onTranscript : function () {};
+    cb.initOverride = opts.initOverride || null;
+    inited = true;
+    try { cb.onStatus(state); } catch (e) {}   // let the UI paint the initial state
+  }
+
+  // The hub's mic button dispatches this; a click-dispatched event keeps the
+  // user-gesture context, so getUserMedia inside toggle()->start() is allowed.
+  window.addEventListener('sim-voice-toggle', () => {
+    if (!inited) console.warn('[VoiceBridge] sim-voice-toggle before init(); connecting without a command sink.');
+    toggle();
+  });
+
+  window.VoiceBridge = {
+    init, start, stop, toggle, isActive,
+    registerTool, sendContext,
+    state: () => state,
+    agentId: AGENT_ID,
+  };
+})();
 </script>
 <script>
 (function(){
@@ -530,16 +1001,83 @@ var last=null;
 function frame(now){
   if(last===null) last=now;
   var dt=Math.min((now-last)/1000, 0.1); last=now;
-  if(S.running){ S.t += dt; computeVitals(); }
+  if(S.running){ S.t += dt; computeVitals(); maybeVoiceContext(); }
   drawScene(now); drawEcg(now); refreshMonitor();
   requestAnimationFrame(frame);
+}
+
+// ---------- voice: Dr. Okafor (hands-free, ElevenLabs) ----------
+var voiceOn=false, lastCtxAt=-999;
+var BRIEFING = "This is Doctor Okafor, I'm the attending covering tonight. Quick handoff before you start: your patient is Mr. Delgado, sixty-one, post-op day one from a hip replacement. He just called out with chest pressure and shortness of breath, and he's sweaty, pale and anxious. The crash cart and the twelve-lead are right outside. I'm here if you need me, but you're running this one. Tell me, what do you want to check first?";
+var COACH_PROMPT = "You are Dr. Okafor, a warm, supportive attending physician supervising a nursing trainee during a live emergency. Speak briefly and naturally, like real bedside talk, one or two sentences at a time. Coach Socratically: acknowledge what the nurse notices, ask guiding questions, and give escalating hints ONLY if they are stuck or the patient is deteriorating. NEVER volunteer the diagnosis or name the exact next intervention outright, make them reason it out. When they clearly state an order (for example 'give aspirin', 'call for help', 'start CPR', 'shock him'), confirm it in one short line. Clinically: this is an acute myocardial infarction that will progress to a ventricular fibrillation cardiac arrest within a few minutes if it is not recognized and managed.";
+function setMic(s){
+  var pill=document.getElementById('mic'), lab=document.getElementById('micLabel');
+  if(!pill) return;
+  pill.classList.remove('listening','speaking','error');
+  if(s==='listening'){ pill.classList.add('listening'); if(lab) lab.textContent='Listening'; }
+  else if(s==='agent-speaking'){ pill.classList.add('speaking'); if(lab) lab.textContent='Dr. Okafor'; }
+  else if(s==='connecting'){ if(lab) lab.textContent='Connecting…'; }
+  else if(s==='error'){ pill.classList.add('error'); if(lab) lab.textContent='Mic off — use buttons'; }
+  else { if(lab) lab.textContent = voiceOn ? 'Mic on' : 'Tap to talk'; }
+}
+function orderKeyword(text){
+  var t=(text||'').toLowerCase();
+  var map=[[/aspirin/,'aspirin'],[/oxygen|o2\b|non.?rebreather/,'oxygen'],[/cpr|compress/,'cpr'],
+    [/defib|shock|joule|charge|paddle|\bpads?\b/,'defib'],[/epinephr|\bepi\b|adrenal/,'epi'],[/nitro/,'nitro'],
+    [/rapid response|code team|call.*help|get help|call a code|\bpage\b/,'help'],
+    [/carotid|radial|\bpulse\b/,'pulse'],[/listen|auscultat|breath sound|\blungs?\b|stethoscope/,'listen'],
+    [/blood pressure|\bbp\b|\bcuff\b/,'bp'],[/airway/,'airway'],
+    [/twelve.?lead|12.?lead|\becg\b|\bekg\b|rhythm strip|read the rhythm/,'ecg']];
+  for(var i=0;i<map.length;i++){ if(map[i][0].test(t)) return map[i][1]; }
+  return null;
+}
+function onVoiceOrder(text){
+  say('you','YOU (SPOKEN)', text);
+  var id=orderKeyword(text);
+  if(id){ actions(id); }
+  else { say('sys','NOTE','(Heard you — say the order plainly, e.g. "give aspirin" or "start CPR".)'); }
+}
+function onVoiceStatus(s){ setMic(s); }
+function onVoiceTranscript(who,t){
+  if(!t) return;
+  if(who==='agent') say('doctor','DR. OKAFOR', t);
+  else say('you','YOU', t);
+}
+function maybeVoiceContext(){
+  if(!voiceOn || !window.VoiceBridge || !window.VoiceBridge.isActive()) return;
+  if(S.t - lastCtxAt < 20) return;
+  lastCtxAt=S.t;
+  var vit = (S.phase==='arrest') ? 'He is in cardiac arrest — pulseless, monitor shows a shockable rhythm.' :
+            (S.phase==='dead')   ? 'The patient has died.' :
+            (S.phase==='rosc')   ? 'Pulse and pressure are back — ROSC.' :
+            ('HR '+V.hr+', BP '+V.sbp+'/'+V.dbp+', SpO2 '+V.spo2+', RR '+V.rr+'.');
+  try { window.VoiceBridge.sendContext('Situation update at '+fmt(S.t)+': '+vit+' Only speak if it warrants a nudge; keep it short.'); } catch(e){}
+}
+function startVoice(){
+  if(!window.VoiceBridge){ say('sys','NOTE','(Voice unavailable here — using buttons.)'); return; }
+  try {
+    window.VoiceBridge.init({
+      onCommand:onVoiceOrder, onStatus:onVoiceStatus, onTranscript:onVoiceTranscript,
+      initOverride:{ agent:{ first_message:BRIEFING, prompt:{ prompt:COACH_PROMPT } } }
+    });
+    window.VoiceBridge.start();
+    voiceOn=true; setMic('connecting');
+  } catch(e){ if(window.onerror) window.onerror(e.message); }
+}
+function toggleVoice(){
+  if(!window.VoiceBridge) return;
+  if(window.VoiceBridge.isActive()){ window.VoiceBridge.stop(); voiceOn=false; setMic('idle'); }
+  else if(!started){ safeBegin(); }
+  else { startVoice(); }
 }
 
 // ---------- wiring ----------
 function begin(){
   document.getElementById('gate').classList.add('hidden');
   S.running=true; S.t=0; computeVitals();
-  say('sys','MONITOR','His monitor is alarming. He looks frightened. You have the room to yourself.');
+  say('sys','MONITOR','His monitor is alarming. He looks grey and frightened.');
+  say('doctor','DR. OKAFOR','(connecting — allow the microphone when asked, then just talk to me)');
+  startVoice();
 }
 var started=false;
 function safeBegin(){ if(started) return; started=true; try{ begin(); }catch(e){ if(window.onerror) window.onerror(e.message); } }
@@ -550,6 +1088,8 @@ var bb=document.getElementById('beginBtn');
 ['click','touchend','pointerup'].forEach(function(ev){ if(bb) bb.addEventListener(ev, function(e){ e.preventDefault(); safeBegin(); }); });
 var gate=document.getElementById('gate');
 if(gate) gate.addEventListener('click', safeBegin);
+var micPill=document.getElementById('mic');
+if(micPill) micPill.addEventListener('click', function(e){ e.stopPropagation(); toggleVoice(); });
 document.getElementById('againBtn').addEventListener('click', function(){ location.reload(); });
 document.getElementById('fullBtn').addEventListener('click', function(){ location.href='hub.html'; });
 document.getElementById('bar').addEventListener('click', function(e){
