@@ -4382,7 +4382,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   };
   cineRefs.renderer = renderer; cineRefs.rig = rig; cineRefs.camera = camera;
 
+  // QA P1-2: 'Run again' can re-enter within the previous case's ~300ms fade-out
+  // window, letting the old teardown destroy the NEW ward. A pending-teardown
+  // slot is flushed synchronously before any new mount, and the async path
+  // only runs if its own teardown is still the pending one.
+  let pendingTeardown = null;
   window.addEventListener('sim-vitals-show', function (e) {
+    if (pendingTeardown) { try { pendingTeardown(); } catch (err) {} pendingTeardown = null; }
     const nr = (e.detail && e.detail.normalRanges) || null;
     latestVitals = null;
     const cine = window.Cinematic;
@@ -4418,7 +4424,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     };
     if (cine) {
       // Fade to black, swap back to the hub behind it, fade back in.
-      cine.exitWard(300).then(() => { teardown(); return cine.fadeIn(450); }).catch(teardown);
+      pendingTeardown = teardown;
+      cine.exitWard(300).then(() => {
+        if (pendingTeardown !== teardown) return;   // a new case already flushed it
+        pendingTeardown = null;
+        teardown();
+        return cine.fadeIn(450);
+      }).catch(() => { if (pendingTeardown === teardown) { pendingTeardown = null; teardown(); } });
     } else {
       teardown();
     }
@@ -7533,6 +7545,9 @@ if (typeof window !== 'undefined') {
       ownedMaterials.forEach(function (m) { m.dispose(); });
       ownedMaterials.length = 0;
       skinMats.length = 0;
+      // Light.dispose() frees the shadow-map render target — without this the
+      // key light leaked its 1024x1024 shadow texture on every ward exit (QA P1-1).
+      lights.forEach(function (L) { try { L.light.dispose(); } catch (e) {} });
       lights.length = 0;
     };
 
