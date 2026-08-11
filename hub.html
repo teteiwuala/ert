@@ -3938,7 +3938,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   })();
   window.__LOW_GPU = LOW_GPU;
   const renderer = new THREE.WebGLRenderer({ antialias: !LOW_GPU, alpha: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(LOW_GPU ? 1 : Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(LOW_GPU ? 0.75 : Math.min(window.devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
   // When they DO enter VR on a headset, render the eye buffers below native res too.
   if (LOW_GPU && renderer.xr && renderer.xr.setFramebufferScaleFactor) {
@@ -4378,14 +4378,19 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     ward = window.makeWardScene(THREE, scene, {
       renderer: renderer, camera: camera,
-      patientGLTF: wardModels.patient, clinicianGLTF: wardModels.clinician,
+      // On memory-constrained GPUs, drop the second character entirely (the patient
+      // already borrowed her texture during preload, so he stays fully textured).
+      patientGLTF: wardModels.patient,
+      clinicianGLTF: window.__LOW_GPU ? null : wardModels.clinician,
       patientTransform: WARD_PATIENT_T, clinicianTransform: WARD_CLINICIAN_T,
       clinicianIdleClip: WARD_IDLE_CLIP
     });
-    // Additive enhancements — each guarded, each returns a disposable handle.
-    try { if (window.applyWardGrade) wardGrade = window.applyWardGrade(THREE, renderer, scene, {}); } catch (e) {}
-    try { if (window.makeWardProps) wardProps = window.makeWardProps(THREE, scene, { patientArmWorld: { x: 0.05, y: 0.72, z: -1.5 } }); } catch (e) {}
-    try { if (window.makeWardFX)    wardFx    = window.makeWardFX(THREE, scene, {}); } catch (e) {}
+    // Additive enhancements — extra props/FX cost VRAM, so skip them on low-GPU devices.
+    if (!window.__LOW_GPU) {
+      try { if (window.applyWardGrade) wardGrade = window.applyWardGrade(THREE, renderer, scene, {}); } catch (e) {}
+      try { if (window.makeWardProps) wardProps = window.makeWardProps(THREE, scene, { patientArmWorld: { x: 0.05, y: 0.72, z: -1.5 } }); } catch (e) {}
+      try { if (window.makeWardFX)    wardFx    = window.makeWardFX(THREE, scene, {}); } catch (e) {}
+    }
     try { if (window.WardAudio)     { window.WardAudio.start(); if (latestVitals) window.WardAudio.setVitals(latestVitals); } } catch (e) {}
     // We drive the camera via the rig only; reset any framing the ward applied,
     // then place the rig at a bedside establishing view.
