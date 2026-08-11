@@ -193,6 +193,19 @@
 </div>
 
 <script>
+/* Surface any script error on-screen (headsets have no dev console) so we can see
+   what broke instead of a dead button. Registered before the main script runs. */
+window.addEventListener('error', function(ev){
+  try {
+    var b=document.getElementById('errbar');
+    if(!b){ b=document.createElement('div'); b.id='errbar';
+      b.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:9999;background:#3a0f0d;color:#ffb3ad;font:13px/1.5 monospace;padding:10px 14px;border-top:2px solid #ff5a52';
+      document.body.appendChild(b); }
+    b.textContent='⚠ '+(ev.message||'error')+'  ('+(ev.filename||'')+':'+(ev.lineno||'?')+')';
+  } catch(e){}
+});
+</script>
+<script>
 (function(){
 "use strict";
 // ---------- state ----------
@@ -251,7 +264,7 @@ function enterArrest(){
 function enterRosc(){
   S.phase='rosc'; S.roscT=S.t;
   say('pt','MONITOR','A rhythm returns on the monitor — narrow complexes, a real pulse. ROSC.');
-  say('sys','CHARGE RN','"Good work — we've got him back. Keep the pads on and watch him."');
+  say('sys','CHARGE RN','"Good work — we\'ve got him back. Keep the pads on and watch him."');
   endGame(true);
 }
 function enterDead(){
@@ -273,7 +286,7 @@ function actions(a){
       else say2('Check a radial pulse.', 'FINDING', 'Pulse '+V.hr+' bpm — fast and thready.'); return;
     case 'listen':
       if(inArrest()){ say('you','YOU','Listen for breath sounds.'); say('bad','FINDING','No spontaneous breathing.'); }
-      else say2('Listen to the chest.', 'FINDING', 'Tachycardic, lungs clear. He winces — "it's like an elephant on my chest."'); return;
+      else say2('Listen to the chest.', 'FINDING', 'Tachycardic, lungs clear. He winces — "it\'s like an elephant on my chest."'); return;
     case 'bp':
       if(inArrest()) say2('Cycle a blood pressure.','FINDING','No measurable pressure.');
       else say2('Cycle a blood pressure.','FINDING','BP '+V.sbp+'/'+V.dbp+' mmHg.'); return;
@@ -287,7 +300,7 @@ function actions(a){
 
     case 'oxygen':
       if(S.o2){ say('sys','NOTE','Oxygen already running.'); return; }
-      S.o2=true; say2('Apply high-flow oxygen.','PATIENT','"...that's a little easier." SpO₂ ticks up.');
+      S.o2=true; say2('Apply high-flow oxygen.','PATIENT','"...that\'s a little easier." SpO₂ ticks up.');
       S.arrestAt=computeArrestAt(); return;
     case 'aspirin':
       if(S.aspirin){ say('sys','NOTE','Aspirin already given.'); return; }
@@ -528,13 +541,23 @@ function begin(){
   S.running=true; S.t=0; computeVitals();
   say('sys','MONITOR','His monitor is alarming. He looks frightened. You have the room to yourself.');
 }
-document.getElementById('beginBtn').addEventListener('click', begin);
+var started=false;
+function safeBegin(){ if(started) return; started=true; try{ begin(); }catch(e){ if(window.onerror) window.onerror(e.message); } }
+// Bind the Begin button several ways — some headset browsers don't fire 'click'
+// reliably from a controller, so accept touch/pointer too, and let a tap anywhere
+// on the handoff card start the shift.
+var bb=document.getElementById('beginBtn');
+['click','touchend','pointerup'].forEach(function(ev){ if(bb) bb.addEventListener(ev, function(e){ e.preventDefault(); safeBegin(); }); });
+var gate=document.getElementById('gate');
+if(gate) gate.addEventListener('click', safeBegin);
 document.getElementById('againBtn').addEventListener('click', function(){ location.reload(); });
 document.getElementById('fullBtn').addEventListener('click', function(){ location.href='hub.html'; });
 document.getElementById('bar').addEventListener('click', function(e){
   var b=e.target.closest('button.act'); if(!b) return; actions(b.getAttribute('data-a'));
 });
 resize(); requestAnimationFrame(frame);
+// QA/self-test: ?autostart=1 begins immediately (headless verification).
+try { if(new URLSearchParams(location.search).get('autostart')) setTimeout(safeBegin, 300); } catch(e){}
 })();
 </script>
 </body>
