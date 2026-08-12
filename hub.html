@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b16');   // build marker: proves which deploy a run used
+  window.__crumb('boot b17');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4318,7 +4318,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const tip = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8),
       new THREE.MeshBasicMaterial({ color: CY, transparent: true, opacity: 0.9, depthTest: false }));
     tip.position.set(0, 0, -1.2); tip.renderOrder = 11; line.add(tip);
-    ctrl.add(line); scene.add(ctrl);
+    // Controllers/hands MUST hang off the same rig as the camera. Parented to
+    // the scene they stay at world origin while the rig teleports the player
+    // to the bedside (and thumbstick locomotion moves it further) — the hands
+    // then float metres away from the user instead of on their wrists.
+    ctrl.add(line); rig.add(ctrl);
     const rec = { obj: ctrl, connected: false };
     ctrl.addEventListener('connected', e => { rec.connected = true; rec.hand = (e.data && e.data.handedness) || ''; line.visible = !(e.data && e.data.hand); });
     ctrl.addEventListener('disconnected', () => rec.connected = false);
@@ -4338,7 +4342,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const grip = renderer.xr.getControllerGrip(i);
     const glove = makeGlove(THREE);
     glove.visible = false;
-    grip.add(glove); scene.add(grip);
+    grip.add(glove); rig.add(grip);
     rec.glove = glove;
     ctrl.addEventListener('connected', e => {
       const isHand = !!(e.data && e.data.hand);
@@ -4350,7 +4354,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     const hand = renderer.xr.getHand(i);
     hand.addEventListener('pinchstart', () => xrPick(ctrl));
-    scene.add(hand);
+    rig.add(hand);
     inputs.push(rec);
   }
 
@@ -4977,7 +4981,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 16 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 17 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7283,6 +7287,26 @@ if (typeof window !== 'undefined') {
     emit('sim-heart-state', { mode: mode, hr: Math.max(v.hr, mode === 'vf' ? 0 : v.hr),
       contractility: Math.max(0, Math.min(1, v.sbp / 130)) });
   }
+  // ---- Dr. Okafor, the coaching voice -----------------------------------
+  // THIRD VOICE, not the patient's. These lines used to be pushed into the
+  // live patient agent as contextual updates, so the PATIENT voiced the
+  // attending's coaching — wrong character, and it broke the illusion that
+  // someone senior is on the line. The nudge texts are static scenario data,
+  // so they ship as pre-rendered clips in the doctor's voice (assets/doc/):
+  // deterministic, no second socket to fight the patient's audio, and no
+  // extra latency. Falls back to the on-screen log if a clip is missing.
+  var docAudio = null;
+  function speakDoctor(index, text) {
+    appendLog('doctor', text);
+    var src = (SCN && SCN.doctorAudioPrefix) ? (SCN.doctorAudioPrefix + index + '.mp3') : null;
+    if (!src) return;
+    try {
+      if (docAudio) { docAudio.pause(); }
+      docAudio = new Audio(src);
+      docAudio.play().then(function () { window.__crumb('doc-voice:' + index); }, function () {});
+    } catch (err) {}
+  }
+
   function renderTurn(st) {
     if (!st) return;
     if (typeof st.timeElapsedSeconds === 'number') setClock(st.timeElapsedSeconds);
@@ -7294,7 +7318,7 @@ if (typeof window !== 'undefined') {
         var due = (typeof n.atSeconds === 'number' && st.timeElapsedSeconds >= n.atSeconds) ||
                   (n.onEvent === 'arrest' && (st.vitals.hr <= 30 || st.vitals.sbp <= 40)) ||
                   (n.onEvent === 'post-rosc' && st.trajectory === 'treated');
-        if (due) { nudgesFired[i] = true; try { window.DoctorLink.nudge(n.text); } catch (err) {} }
+        if (due) { nudgesFired[i] = true; speakDoctor(i, n.text); }
       });
     }
     if (st.patientDialogue) appendLog('patient', st.patientDialogue);
@@ -7788,11 +7812,15 @@ if (typeof window !== 'undefined') {
     pillow.castShadow = true; pillow.receiveShadow = true;
     bed.add(pillow);
 
-    // Blanket over the legs — bottom-pivoted so a subtle Y scale reads as breathing.
-    const blanketGeo = G(new THREE.BoxGeometry(BED_W + 0.04, 0.09, 1.15));
-    blanketGeo.translate(0, 0.045, 0);              // origin at underside
+    // Blanket over the legs — bottom-pivoted so a subtle Y scale reads as
+    // breathing. Runs from the feet up to the waist: the gowned patient model
+    // is a pre-posed mesh whose legs cannot be closed (no rig), and a short
+    // blanket left the gown hem gaping. Real ward practice covers a supine
+    // patient to the waist anyway, so this is both the fix and the truth.
+    const blanketGeo = G(new THREE.BoxGeometry(BED_W + 0.06, 0.11, 1.62));
+    blanketGeo.translate(0, 0.055, 0);              // origin at underside
     const blanket = new THREE.Mesh(blanketGeo, blanketMat);
-    blanket.position.set(0, MATTRESS_TOP, splitZ + flatLen - 0.62);
+    blanket.position.set(0, MATTRESS_TOP + 0.02, splitZ + flatLen - 0.86);
     blanket.castShadow = true; blanket.receiveShadow = true;
     bed.add(blanket);
 
@@ -12742,6 +12770,7 @@ const MI_SCENARIO = {
   allowArrestZeros: true,                       // VF/asystole may clamp to true zeros (flatline, asystole heart mode)
   cprInterventionId: 'start-cpr',               // while active on an untreated arrest, decay keyframes pause
   handoffAudio: 'assets/handoff-mi.mp3',        // charge-nurse brief (pre-generated TTS, Margaret Brandt)
+  doctorAudioPrefix: 'assets/doc/mi-',          // Dr. Okafor coaching clips, indexed by doctorNudges position
   voiceAgentId: 'agent_0301kzvctvehfmyrztvnmx16kd6d',  // "Margaret Brandt - MI sim patient" (ElevenLabs, second account)
   title: 'Code in Bay 2',
   subtitle: 'Acute MI to cardiac arrest',
@@ -14548,18 +14577,38 @@ window.MI_SCENARIO = MI_SCENARIO;
         baseScale = TARGET_SPAN / maxDim;
         inner.position.set(-ctr.x, -ctr.y, -ctr.z);
         pulse.scale.setScalar(baseScale);
+        // The scan ships every structure on ONE flat dark-red material, which
+        // reads as an anatomically-shaped blob. The 14 meshes are named
+        // (VH_F_left_ventricle, VH_F_mitral_valve, …), so give each its own
+        // clone tinted by anatomy: oxygenated left chambers red, deoxygenated
+        // right chambers blue-violet (standard teaching convention), valves
+        // pale collagen, papillary muscle pink. Every clone is registered in
+        // mats/baseCols, so the existing mode tinting (ischemia darkening,
+        // asystole grey, ROSC recovery) still drives all of them.
+        var TINTS = [
+          [/left_ventricle/i,        0xb0242a],
+          [/left_cardiac_atrium/i,   0xc03840],
+          [/right_ventricle/i,       0x5d6fa8],
+          [/right_cardiac_atrium/i,  0x6b7cb4],
+          [/interventricular_septum/i, 0x8e2a27],
+          [/papillary/i,             0xc4666a],
+          [/valve/i,                 0xe6dcc6]
+        ];
         model.traverse(function (o) {
-          if (!o.isMesh) return;
+          if (!o.isMesh || !o.material) return;
           o.castShadow = false; o.receiveShadow = false;
-          var m = o.material;
-          if (m && mats.indexOf(m) === -1) {
-            // Keep the GLB's own red, matte it down and add a whisper of
-            // self-illumination so the hologram never goes fully black.
-            m.roughness = 0.55;
-            if (m.emissive) { m.emissive.copy(m.color).multiplyScalar(0.18); }
-            mats.push(m);
-            baseCols.push(m.color.clone());
+          var m = o.material.clone();       // per-structure, so tints differ
+          var name = o.name || '';
+          for (var t = 0; t < TINTS.length; t++) {
+            if (TINTS[t][0].test(name)) { m.color.setHex(TINTS[t][1]); break; }
           }
+          // Wet myocardium: low roughness catches the room lights as sheen.
+          m.roughness = 0.38;
+          if ('metalness' in m) m.metalness = 0.0;
+          if (m.emissive) m.emissive.copy(m.color).multiplyScalar(0.16);
+          o.material = m;
+          mats.push(m);
+          baseCols.push(m.color.clone());
         });
         inner.add(model);
       }, undefined, function () { failToProcedural(); });
