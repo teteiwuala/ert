@@ -3949,6 +3949,20 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } catch (e) {}
   };
   window.addEventListener('pagehide', function () { window.__crumb('clean-exit'); });
+
+  // Focusing ANY text field during an immersive WebXR session summons the
+  // Quest system keyboard, which cannot composite over immersive content and
+  // force-kills the whole browser (confirmed twice via the black-box: the key
+  // gate, then the HUD command box). The hub sets __xrPresenting on XR
+  // session start/end; while it's true, element.focus() becomes a no-op —
+  // the DOM is invisible in-headset anyway, so focus has no value there.
+  (function () {
+    var origFocus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function () {
+      if (window.__xrPresenting) { window.__crumb('focus-blocked'); return; }
+      return origFocus.apply(this, arguments);
+    };
+  })();
   window.__lastRunCrumbs = (function () {
     try {
       var a = JSON.parse(localStorage.getItem('quest-crumbs') || '[]');
@@ -3957,6 +3971,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } catch (e) { return []; }
   })();
   window.__crumb('boot');
+
+  // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
+  // played by beginCase when a scenario starts).
+  try {
+    window.__handoffAudio = new Audio('assets/handoff.mp3');
+    window.__handoffAudio.preload = 'auto';
+  } catch (e) {}
 
   const CY = 0x00e5ff, CYs = '#00e5ff', AMBER = '#ffb020';
 
@@ -6885,6 +6906,17 @@ if (typeof window !== 'undefined') {
   function beginCase() {
     started = true; reported = false;
     cprOn = false; nudgesFired = {};
+    // Charge-nurse SBAR handoff, spoken aloud (pre-generated TTS asset — the
+    // handoffScript text verbatim, in a third voice distinct from the patient
+    // and the doctor). This is the in-headset replacement for the DOM brief,
+    // and desktop hears it too after clicking Begin.
+    try {
+      if (window.__handoffAudio) {
+        window.__handoffAudio.currentTime = 0;
+        window.__handoffAudio.play().then(function () { window.__crumb('handoff-audio'); },
+                                          function () {});
+      }
+    } catch (err) {}
     if (window.DoctorLink) {
       try {
         window.DoctorLink.init({
@@ -6962,7 +6994,7 @@ if (typeof window !== 'undefined') {
     var mic = btn('🎤', false); mic.title = 'Voice (uses the scene voice agent)';
     mic.onclick = function () { emit('sim-voice-toggle', {}); };
     bar.appendChild(mic); bar.appendChild(input); bar.appendChild(wait); bar.appendChild(send);
-    hud = bar; r.appendChild(bar); input.focus();
+    hud = bar; r.appendChild(bar); if (!window.__xrPresenting) input.focus();
   }
 
   function submitCommand(text) {
