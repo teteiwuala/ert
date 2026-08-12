@@ -4269,6 +4269,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     ndc.set((px/innerWidth)*2-1, -(py/innerHeight)*2+1);
     rayc.setFromCamera(ndc, camera);
     if (pInteract && pInteract.pick && pInteract.pick(rayc)) return;   // touch zones first
+    if (ward) return;   // hidden lobby panels still raycast — don't eat clicks inside the ward
     const hit = rayc.intersectObjects(panels.map(p => p.face), false)[0];
     if (hit) selectPanel(panels[hit.object.userData.index]);
   }
@@ -4312,6 +4313,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     xrRay.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
     xrRay.ray.direction.set(0,0,-1).applyMatrix4(tmpM).normalize();
     if (pInteract && pInteract.pick && pInteract.pick(xrRay)) return;
+    if (ward) return;   // in the ward the lobby panels are hidden, but raycasts still hit them — don't let them eat clicks
     const hit = xrRay.intersectObjects(panels.map(p => p.face), false)[0];
     if (hit) selectPanel(panels[hit.object.userData.index]);
   }
