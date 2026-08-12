@@ -2499,9 +2499,22 @@ const VoiceInput = (function () {
   // Brave's fingerprinting Shields, hardware acceleration switched off, an old
   // driver, or a locked-down work machine. Fail with an explanation the user can
   // act on rather than an exception nobody can read.
+  // Memory-constrained GPUs (Quest / standalone-VR browsers, phones) OOM-kill
+  // the tab when the room builds at full DPR + MSAA + shadow maps. Detect them
+  // and build a lighter pipeline — WebGL still works, we just spend less VRAM.
+  const LOW_GPU = (function(){
+    try {
+      var ua = navigator.userAgent || '';
+      if (/OculusBrowser|Quest|Pico|Wolvic|VR/i.test(ua)) return true;
+      if (/Mobi|Android|iPhone|iPad|iPod/i.test(ua)) return true;
+      if (typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4) return true;
+    } catch (e) { return true; }
+    return false;
+  })();
+  window.__LOW_GPU = LOW_GPU;
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: !LOW_GPU });
   } catch (glErr) {
     var box = document.createElement('div');
     box.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;' +
@@ -2521,9 +2534,10 @@ const VoiceInput = (function () {
     document.body.appendChild(box);
     return;                                  // stop the module cleanly
   }
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(LOW_GPU ? 0.75 : Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
+  if (LOW_GPU) renderer.shadowMap.enabled = false;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   // WebXR: enabled always (harmless on desktop — nothing happens until a
   // session is requested). 'local-floor' puts y=0 at the physical floor, which
@@ -2531,7 +2545,20 @@ const VoiceInput = (function () {
   // no vertical fudging.
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
+  // When they DO enter VR on a headset, render the eye buffers below native
+  // res too. Must be set before any XR session starts.
+  if (LOW_GPU && renderer.xr.setFramebufferScaleFactor) {
+    try { renderer.xr.setFramebufferScaleFactor(0.7); } catch (e) {}
+  }
   canvasWrap.appendChild(renderer.domElement);
+  // Quest kills WebGL contexts under memory pressure or headset doze. Without
+  // preventDefault the context can never be restored; either way three.js
+  // cannot transparently rebuild this much scene state, so say so instead of
+  // leaving a silent black void.
+  renderer.domElement.addEventListener('webglcontextlost', function (e) {
+    e.preventDefault();
+    try { setFeedback('3D:', 'Graphics context lost — reload the page to continue.'); } catch (err) {}
+  });
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x05090f);
@@ -4313,7 +4340,7 @@ const VoiceInput = (function () {
     applyWorldPlacement(WORLD_FLAT);
     xrUI.visible = false;
     hideModal();
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = !LOW_GPU;   // never re-enable shadows on a low-memory GPU
     vrBtn.textContent = 'Enter VR';
     applyOrbit();                       // restore the flat camera
     if (pendingDebrief) { pendingDebrief = false; showDebriefDOM(); }
