@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b15');   // build marker: proves which deploy a run used
+  window.__crumb('boot b16');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4331,10 +4331,61 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (rec.hand === 'left') window.dispatchEvent(new CustomEvent('sim-case-menu'));
       else window.dispatchEvent(new CustomEvent('sim-voice-toggle'));
     });
+    // Gloved hand on the GRIP space (where the hand actually is; the
+    // controller space above is the aim ray, which sits forward of the fist).
+    // Built once per controller, shown only while a physical controller is
+    // held — tracked hands get the joint dots below instead.
+    const grip = renderer.xr.getControllerGrip(i);
+    const glove = makeGlove(THREE);
+    glove.visible = false;
+    grip.add(glove); scene.add(grip);
+    rec.glove = glove;
+    ctrl.addEventListener('connected', e => {
+      const isHand = !!(e.data && e.data.hand);
+      glove.visible = !isHand;
+      // Mirror for the left hand: the glove is modelled right-handed.
+      glove.scale.x = ((e.data && e.data.handedness) === 'left') ? -1 : 1;
+    });
+    ctrl.addEventListener('disconnected', () => { glove.visible = false; });
+
     const hand = renderer.xr.getHand(i);
     hand.addEventListener('pinchstart', () => xrPick(ctrl));
     scene.add(hand);
     inputs.push(rec);
+  }
+
+  // Nitrile-gloved hand, procedural: palm + thumb + 4 two-segment fingers,
+  // curled as if holding a controller, plus a cuff at the wrist. One shared
+  // material; ~11 small meshes per hand is cheap and avoids needing a rigged
+  // hand asset. Fingers point along -Z of the grip space, palm faces -Y.
+  function makeGlove(THREE) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x7fb8d4, roughness: 0.6, metalness: 0.0 });
+    const seg = (len, rad) => new THREE.CylinderGeometry(rad, rad * 0.88, len, 8);
+    const put = (geo, x, y, z, rx, ry, rz) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z); m.rotation.set(rx || 0, ry || 0, rz || 0);
+      g.add(m); return m;
+    };
+    // palm — rounded slab, long axis along -Z
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.032, 0.085), mat);
+    palm.position.set(0, -0.005, -0.025); g.add(palm);
+    // cuff at the wrist
+    put(new THREE.CylinderGeometry(0.036, 0.040, 0.030, 12), 0, -0.004, 0.028, Math.PI / 2, 0, 0);
+    // four fingers, curling down and inward around an imagined grip
+    const fx = [-0.026, -0.009, 0.009, 0.026];
+    const flen = [0.036, 0.040, 0.038, 0.032];
+    for (let f = 0; f < 4; f++) {
+      const p1 = put(seg(flen[f], 0.0085), fx[f], -0.012, -0.072, -1.05, 0, 0);
+      const p2 = new THREE.Mesh(seg(flen[f] * 0.8, 0.0075), mat);
+      p2.position.set(0, -flen[f] * 0.5, 0); p2.rotation.x = -0.95;
+      p1.add(p2);
+    }
+    // thumb — across the palm, as if wrapped over a grip
+    const t1 = put(seg(0.034, 0.010), -0.040, -0.010, -0.030, -0.55, 0, 0.95);
+    const t2 = new THREE.Mesh(seg(0.026, 0.0085), mat);
+    t2.position.set(0, -0.017, 0); t2.rotation.z = 0.55; t1.add(t2);
+    return g;
   }
   // Hand-tracking joint visualization. Quest hand input renders NOTHING by
   // default (r160 exposes hand.joints but draws no meshes), so tracked hands
@@ -4772,6 +4823,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   window.addEventListener('sim-heart-show', function () {
+    // Prefer the scanned anatomical heart (assets/heart.glb); it proxies to
+    // the procedural one internally if the GLB fails to load.
+    if (!heartViz && typeof window.makeHeartVizReal === 'function') {
+      try { heartViz = window.makeHeartVizReal(THREE, scene, { camera: camera }); } catch (err) {}
+    }
     if (!heartViz && typeof window.makeHeartViz === 'function') {
       try { heartViz = window.makeHeartViz(THREE, scene, { camera: camera }); } catch (err) {}
     }
@@ -4921,7 +4977,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 15 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 16 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7117,7 +7173,26 @@ if (typeof window !== 'undefined') {
           onAssess: function (zone, what) { var r = quickAssess(zone, what); appendLog('cue', 'Assessed ' + (what || zone) + ': ' + r); return r; },
           onEnd: function () { endCase('ended'); },
           onStatus: function (st) { setChip(st === 'listening' ? 'DR. OKAFOR LISTENING' : (st === 'agent-speaking' ? 'DR. OKAFOR' : (hasKey() ? 'LIVE AI' : 'SCRIPTED (offline)')), CY); },
-          onTranscript: function (who, text) { if (who === 'agent') appendLog('doctor', text); }
+          onTranscript: function (who, text) {
+            if (who === 'you') {
+              // Deterministic sim-console commands: the agents' LLMs proved
+              // unreliable at calling the cosmetic show/hide_heart tools
+              // (telemetry: issue_order fires, show_heart never does), so the
+              // trainee's own transcript drives them directly.
+              var t = String(text || '').toLowerCase();
+              if (/\b(show|bring up|display|open)\b.*\bheart\b/.test(t)) {
+                emit('sim-heart-show', {}); pushHeartState(PatientLoop.getState());
+              } else if (/\b(hide|remove|clear|close)\b.*\bheart\b/.test(t)) {
+                emit('sim-heart-hide', {});
+              }
+              return;
+            }
+            // The live voice is the PATIENT in both scenarios (Dr. Okafor only
+            // via ?agent=doctor) — label the log line accordingly.
+            var isDoc = false;
+            try { isDoc = /[?&]agent=doctor\b/.test(location.search); } catch (e2) {}
+            appendLog(isDoc ? 'doctor' : 'patient', text);
+          }
         });
       } catch (err) {}
     }
@@ -7515,7 +7590,11 @@ if (typeof window !== 'undefined') {
     // ------------------------------------------------------------------
     // Renderer configuration (guarded — don't fight the host if already set)
     // ------------------------------------------------------------------
-    const BASE_EXPOSURE = 0.72;
+    // Global exposure gate. 0.72 was a deliberately moody grade that made the
+    // whole ward read dim on the headset regardless of light intensities;
+    // 1.0 is a neutral, brightly-lit clinical room. The window daylight is
+    // toneMapped:false, so it is unaffected and still reads as outdoors.
+    const BASE_EXPOSURE = 1.0;
     if (renderer) {
       // Shadow maps allocate extra render targets — the single biggest VRAM cost
       // when the room builds. Skip them entirely on constrained GPUs (Quest/phone);
@@ -7831,7 +7910,7 @@ if (typeof window !== 'undefined') {
     // (Was 0x93a7c8 — a blue-grey that read as a cold, after-hours room.
     // Shifted toward 0xfff0dd; the cyan holograms stay emissive/additive so
     // their contrast against the room survives the warmer bounce.)
-    const key = new THREE.DirectionalLight(0xc9beab, 0.45);
+    const key = new THREE.DirectionalLight(0xfff2e2, 0.62);
     key.position.set(2.4, 3.2, 1.6);
     key.target.position.set(BED_X, MATTRESS_TOP, BED_CZ - 0.3);
     key.castShadow = true;
@@ -7850,13 +7929,15 @@ if (typeof window !== 'undefined') {
 
     // Ambient fill: sky vs floor bounce. Warmed from 0x2e3c52/0.22 and lifted
     // ~14% — the room read dark and solemn with the cool fill.
-    const hemi = new THREE.HemisphereLight(0x4a443a, 0x241f19, 0.25);
+    // (Lifted again to 0.55 with a near-white sky term — a real ward is
+    // brightly, evenly lit; the moody falloff read as "abandoned at night".)
+    const hemi = new THREE.HemisphereLight(0xf4f2ea, 0x5a544a, 0.55);
     group.add(hemi);
     trackLight(hemi);
 
     // Soft overhead "area" light above the bed.
     // (PointLight instead of RectAreaLight — see perf note at top of file.)
-    const overhead = new THREE.PointLight(0xffdba8, 2.2, 6.5, 2);
+    const overhead = new THREE.PointLight(0xfff0dc, 3.4, 7.5, 2);
     overhead.position.set(BED_X, ROOM_H - 0.35, BED_CZ + 0.1);
     group.add(overhead);
     trackLight(overhead);
@@ -9553,11 +9634,20 @@ if (typeof window !== 'undefined') {
     //    Low intensities: the cyan holograms (emissive/additive, unlit)
     //    must keep their contrast against the room.
     // =====================================================================
-    var warmHemi = new THREE.HemisphereLight(0xfff2e2, 0x2e2820, 0.3);
+    // Clinical-white and BRIGHT: hospital wards are over-lit, not moody.
+    var warmHemi = new THREE.HemisphereLight(0xfdfdf8, 0x8a8578, 0.85);
     group.add(warmHemi); lights.push(warmHemi);
-    var warmFill = new THREE.PointLight(0xffe3bd, 0.9, 6.0, 2);
+    var warmFill = new THREE.PointLight(0xfff4e4, 1.9, 7.0, 2);
     warmFill.position.set(0.9, ROOM_H - 0.3, 0.7);
     group.add(warmFill); lights.push(warmFill);
+    // Second fill on the opposite side so no corner falls into gloom.
+    var coolFill = new THREE.PointLight(0xf2f6ff, 1.5, 7.0, 2);
+    coolFill.position.set(-1.1, ROOM_H - 0.35, -1.3);
+    group.add(coolFill); lights.push(coolFill);
+    // Mid-room ambient lift — walls and floor should read bright, not grey.
+    var midFill = new THREE.PointLight(0xfffaf0, 1.2, 8.0, 2);
+    midFill.position.set(0, 2.3, 0.2);
+    group.add(midFill); lights.push(midFill);
 
     // =====================================================================
     // 2) WINDOW DAYLIGHT — sky + clouds + distant skyline canvas inside the
@@ -14309,6 +14399,319 @@ window.MI_SCENARIO = MI_SCENARIO;
   };
 })();
 
+</script>
+<script>
+/* =====================================================================
+   heart-viz-real.js — GLB anatomical heart for the ward's holographic
+   cardiac exhibit. THREE r160 UMD global + THREE.GLTFLoader.
+
+   Asset: assets/heart.glb — NIH Visible Human female heart, ~86k tris,
+   14 named meshes (ventricles/atria/valves) sharing ONE untextured
+   'heart_mat' material (dark-red baseColor), units metres, native span
+   ~0.14 m centered near (0.04, 0.445, -0.06).
+
+   window.makeHeartVizReal(THREE, scene, opts) -> hv
+     Same API as makeHeartViz (drop-in): show()/hide()/isShown(),
+     setState({mode, hr, contractility}), update(dt, now), dispose().
+
+   DESIGN CONSTRAINTS:
+   - Loads ASYNC. show()/setState() before the GLB arrives are buffered
+     and applied on load — the hub re-pushes state every turn, so a late
+     arrival is invisible. If the load FAILS this module instantiates the
+     procedural window.makeHeartViz and becomes a thin proxy over it, so
+     the hub keeps a single code path either way.
+   - ANIMATION IS WHOLE-OBJECT ONLY. 86k tris is far past the per-vertex
+     displacement budget the procedural heart works within (~1.9k verts),
+     so: beat = uniform scale pulse; VF = coarse ~10 Hz rotation/scale
+     shiver; CPR = external y-squeeze at 1.8 Hz; asystole = slow droop.
+     No vertex data is ever touched per frame.
+   - Color moves (ischemia darkening, asystole grey-brown, ROSC re-red
+     over ~3 s) are LERPED in update(), never snapped.
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  var TAU = Math.PI * 2;
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  window.makeHeartVizReal = function (THREE, scene, opts) {
+    opts = opts || {};
+    var pos = opts.position || { x: -1.55, y: 1.45, z: -0.9 };
+    var TARGET_SPAN = 0.34;               // largest dimension after rescale, m
+
+    // ---- state (buffered until the GLB lands) ------------------------
+    var state = { mode: 'baseline', hr: 72, contractility: 1 };
+    var period = 60 / 72;
+    var shown = false, disposed = false;
+    var showAnim = 0, showDir = 0;        // scale-in/out ease like makeHeartViz
+
+    // ---- fallback proxy -----------------------------------------------
+    // On load failure we become a shell over the procedural heart: every
+    // API method checks `fallback` first and delegates.
+    var fallback = null;
+
+    // ---- scene graph: root(pos+show scale) > spin(yaw/jitter) >
+    //      pulse(base scale * beat) > inner(recenter+posture) > model ----
+    var root = new THREE.Group();
+    root.position.set(pos.x, pos.y, pos.z);
+    root.visible = false;
+    root.scale.setScalar(0.001);
+    scene.add(root);
+    var spin = new THREE.Group(); root.add(spin);
+    var pulse = new THREE.Group(); spin.add(pulse);
+    var inner = new THREE.Group(); pulse.add(inner);
+    inner.rotation.set(0.10, 0, 0.12);    // slight organic posture tilt
+
+    var model = null;
+    var baseScale = 1;
+    var mats = [];                        // unique GLB materials (expect 1)
+    var baseCols = [];                    // their as-shipped red base colors
+
+    // ---- faint cyan back-glow (local replica of the vrui glow-sprite
+    //      pattern — modules never call across each other) ---------------
+    var glowTex = (function () {
+      var c = document.createElement('canvas'); c.width = c.height = 128;
+      var g = c.getContext('2d');
+      var gr = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+      gr.addColorStop(0, 'rgba(0,229,255,0.50)');
+      gr.addColorStop(1, 'rgba(0,229,255,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+      return new THREE.CanvasTexture(c);
+    })();
+    var glowMat = new THREE.SpriteMaterial({
+      map: glowTex, transparent: true, opacity: 0.45,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+    });
+    var glow = new THREE.Sprite(glowMat);
+    glow.raycast = function () {};
+    glow.scale.set(0.8, 0.8, 1); glow.position.set(0, 0, -0.12);
+    root.add(glow);
+
+    // Soft local key so the model reads even though the room lights sit
+    // metres away (warm white, short throw — must not repaint the ward).
+    var fill = new THREE.PointLight(0xfff1dd, 0.8, 1.6, 2.0);
+    fill.position.set(0.28, 0.32, 0.42);
+    root.add(fill);
+
+    function teardownLocal() {
+      scene.remove(root);
+      if (model) {
+        model.traverse(function (o) {
+          if (o.isMesh && o.geometry) o.geometry.dispose();
+        });
+        model = null;
+      }
+      var i;
+      for (i = 0; i < mats.length; i++) { try { mats[i].dispose(); } catch (e) {} }
+      mats.length = 0;
+      glowTex.dispose(); glowMat.dispose();
+      if (fill.dispose) { try { fill.dispose(); } catch (e) {} }
+    }
+
+    function failToProcedural() {
+      if (disposed || fallback) return;
+      hv.failed = true;
+      teardownLocal();
+      try {
+        if (typeof window.makeHeartViz === 'function') {
+          fallback = window.makeHeartViz(THREE, scene, opts);
+          fallback.setState(state);
+          if (shown) fallback.show();
+        }
+      } catch (err) { fallback = null; }
+    }
+
+    // ---- async load ---------------------------------------------------
+    (function load() {
+      if (typeof THREE.GLTFLoader !== 'function') { failToProcedural(); return; }
+      var loader;
+      try { loader = new THREE.GLTFLoader(); } catch (err) { failToProcedural(); return; }
+      loader.load('assets/heart.glb', function (gltf) {
+        if (disposed || fallback) {          // arrived too late — free it
+          try {
+            gltf.scene.traverse(function (o) {
+              if (o.isMesh) {
+                if (o.geometry) o.geometry.dispose();
+                if (o.material && o.material.dispose) o.material.dispose();
+              }
+            });
+          } catch (e) {}
+          return;
+        }
+        model = gltf.scene;
+        // Recenter about the mesh bounds and normalize the exhibit size.
+        var box = new THREE.Box3().setFromObject(model);
+        var ctr = box.getCenter(new THREE.Vector3());
+        var size = box.getSize(new THREE.Vector3());
+        var maxDim = Math.max(size.x, size.y, size.z) || 1;
+        baseScale = TARGET_SPAN / maxDim;
+        inner.position.set(-ctr.x, -ctr.y, -ctr.z);
+        pulse.scale.setScalar(baseScale);
+        model.traverse(function (o) {
+          if (!o.isMesh) return;
+          o.castShadow = false; o.receiveShadow = false;
+          var m = o.material;
+          if (m && mats.indexOf(m) === -1) {
+            // Keep the GLB's own red, matte it down and add a whisper of
+            // self-illumination so the hologram never goes fully black.
+            m.roughness = 0.55;
+            if (m.emissive) { m.emissive.copy(m.color).multiplyScalar(0.18); }
+            mats.push(m);
+            baseCols.push(m.color.clone());
+          }
+        });
+        inner.add(model);
+      }, undefined, function () { failToProcedural(); });
+    })();
+
+    // ---- beat + mode animation ---------------------------------------
+    // Two-bump "lub-dub": main systolic squeeze then a smaller diastolic
+    // rebound; zero for the rest of the cycle.
+    function beatWave(ph) {
+      if (ph < 0.30) return Math.sin((ph / 0.30) * Math.PI);
+      if (ph >= 0.38 && ph < 0.56) return 0.35 * Math.sin(((ph - 0.38) / 0.18) * Math.PI);
+      return 0;
+    }
+
+    var COL_ISCH = new THREE.Color(0x5a1410);
+    var COL_ASYS = new THREE.Color(0x4a3f3a);
+    var curCol = null, tgtCol = new THREE.Color();
+    var tgtMode = 'base';                 // 'base' | 'isch' | 'asys' | 'hold'
+    var beatPhase = 0;
+    var roscRamp = 1;                     // beat-amplitude ramp after ROSC
+    var droop = 0;                        // asystole rotation.x sag
+    var jitT = 0, jrx = 0, jrz = 0, jsc = 0;  // VF shiver targets (~10 Hz)
+
+    function setState(s) {
+      if (fallback) { fallback.setState(s); return; }
+      s = s || {};
+      if (s.mode && s.mode !== state.mode) {
+        if (s.mode === 'rosc') roscRamp = 0;   // amplitude ramps back over ~3 s
+        state.mode = s.mode;
+      }
+      if (typeof s.hr === 'number') state.hr = s.hr;
+      if (typeof s.contractility === 'number') state.contractility = clamp(s.contractility, 0, 1);
+      period = 60 / Math.max(20, state.hr || 72);
+      switch (state.mode) {
+        case 'ischemia': tgtMode = 'isch'; break;
+        case 'asystole': tgtMode = 'asys'; break;
+        // VF/CPR keep whatever color the heart already had (they usually
+        // follow ischemia, so the muscle stays dark until ROSC re-pinks).
+        case 'vf': case 'cpr': tgtMode = 'hold'; break;
+        default: tgtMode = 'base';        // baseline + rosc: back to red
+      }
+    }
+
+    function update(dt, now) {
+      if (fallback) { fallback.update(dt, now); return; }
+      if (!(dt > 0)) dt = 0.016;
+      if (dt > 0.1) dt = 0.1;
+      if (typeof now !== 'number') now = performance.now() / 1000;
+
+      // show/hide scale ease (matches the procedural heart's 0.4 s pop)
+      if (showDir !== 0) {
+        showAnim += dt / 0.4;
+        var t = clamp(showAnim, 0, 1);
+        var sc = showDir > 0 ? easeOutCubic(t) : (1 - easeOutCubic(t));
+        root.scale.setScalar(Math.max(0.001, sc));
+        if (t >= 1) { if (showDir < 0) root.visible = false; showDir = 0; }
+      }
+      if (!root.visible) return;
+
+      glowMat.opacity = 0.38 + 0.07 * Math.sin(now * 1.7 + 1.3);
+      if (!model) return;                 // still downloading — glow only
+
+      var mode = state.mode;
+      var i;
+
+      // ---- color easing (never snapped) ------------------------------
+      if (tgtMode !== 'hold') {
+        // half-life 0.75 s => ~94% converged in 3 s (the ROSC spec)
+        var k = 1 - Math.pow(0.5, dt / 0.75);
+        for (i = 0; i < mats.length; i++) {
+          if (tgtMode === 'isch') tgtCol.copy(baseCols[i]).lerp(COL_ISCH, 0.85);
+          else if (tgtMode === 'asys') tgtCol.copy(COL_ASYS);
+          else tgtCol.copy(baseCols[i]);
+          mats[i].color.lerp(tgtCol, k);
+          if (mats[i].emissive) mats[i].emissive.copy(mats[i].color).multiplyScalar(0.18);
+        }
+      }
+
+      // ---- motion per mode --------------------------------------------
+      var yawOn = (mode !== 'asystole');
+      if (yawOn) spin.rotation.y += 0.15 * dt;      // slow exhibit turn
+      var e = 1 - Math.pow(0.5, dt / 0.8);
+      droop += (((mode === 'asystole') ? 0.15 : 0) - droop) * e;
+      roscRamp = Math.min(1, roscRamp + dt / 3);
+
+      var sx = 1, sy = 1, sz = 1;
+      jrx = (mode === 'vf') ? jrx : 0; jrz = (mode === 'vf') ? jrz : 0;
+
+      if (mode === 'baseline' || mode === 'ischemia' || mode === 'rosc') {
+        beatPhase = (beatPhase + dt / period) % 1;
+        var amp = 0.06 * state.contractility *
+                  (mode === 'ischemia' ? 0.7 : 1) *
+                  (mode === 'rosc' ? roscRamp : 1);
+        var w = 1 + amp * beatWave(beatPhase);
+        sx = sy = sz = w;
+      } else if (mode === 'vf') {
+        // Coarse fibrillation shiver: retarget small random rotation and
+        // scale offsets at ~10 Hz. (86k verts rules out per-vertex quiver.)
+        jitT -= dt;
+        if (jitT <= 0) {
+          jitT = 0.1;
+          jrx = (Math.random() - 0.5) * 0.04;       // +/-0.02 rad
+          jrz = (Math.random() - 0.5) * 0.04;
+          jsc = (Math.random() - 0.5) * 0.03;       // +/-0.015
+        }
+        sx = sy = sz = 1 + jsc;
+      } else if (mode === 'cpr') {
+        // External compressions, 1.8 Hz: chest squashes the ventricles —
+        // y compressed up to 8%, slight x/z bulge to conserve volume.
+        beatPhase = (beatPhase + dt * 1.8) % 1;
+        var sq = Math.pow(Math.max(0, Math.sin(beatPhase * Math.PI)), 1.3);
+        sy = 1 - 0.08 * sq;
+        sx = sz = 1 + 0.03 * sq;
+      }
+      // asystole: no beat, no jitter — droop only (handled above)
+
+      spin.rotation.x = droop + jrx;
+      spin.rotation.z = jrz;
+      pulse.scale.set(baseScale * sx, baseScale * sy, baseScale * sz);
+    }
+
+    // ---- API -----------------------------------------------------------
+    var hv = {
+      failed: false,
+      show: function () {
+        if (fallback) { shown = true; fallback.show(); return; }
+        if (shown && showDir === 0) return;
+        shown = true; root.visible = true;
+        showAnim = (showDir === -1) ? 1 - showAnim : 0;
+        showDir = 1;
+      },
+      hide: function () {
+        if (fallback) { shown = false; fallback.hide(); return; }
+        if (!shown && showDir === 0) return;
+        shown = false;
+        showAnim = (showDir === 1) ? 1 - showAnim : 0;
+        showDir = -1;
+      },
+      isShown: function () { return shown; },
+      setState: setState,
+      update: update,
+      dispose: function () {
+        disposed = true;
+        if (fallback) { try { fallback.dispose(); } catch (e) {} fallback = null; return; }
+        teardownLocal();
+      },
+      group: root
+    };
+    setState(state);
+    return hv;
+  };
+})();
 </script>
 <script>
 /* =====================================================================
