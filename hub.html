@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b20');   // build marker: proves which deploy a run used
+  window.__crumb('boot b21');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5037,7 +5037,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 20 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 21 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7034,12 +7034,20 @@ if (typeof window !== 'undefined') {
   // forwards to the in-world holographic UI (invisible DOM ≠ missing UI).
   var hudClock = '0:00', hudChip = '';
   function emitHud() { emit('sim-hud', { text: hudClock + (hudChip ? '  ·  ' + hudChip : '') }); }
-  var vrLog = [];
+  var vrLog = [], logFlush = null;
   function emitLog(kind, text) {
-    var lab = { you: 'YOU', patient: 'PATIENT', cue: 'OBSERVED', assess: 'NOTE', doctor: 'DR. OKAFOR' }[kind] || '';
+    var lab = { you: 'YOU', patient: 'PATIENT', cue: 'OBSERVED', assess: 'NOTE',
+                doctor: 'DR. OKAFOR', debrief: 'DEBRIEF NURSE' }[kind] || '';
     vrLog.push((lab ? lab + ': ' : '') + String(text || ''));
     if (vrLog.length > 7) vrLog.shift();
-    emit('sim-log', { lines: vrLog });
+    // Coalesce: one turn can append three lines, and every emit repaints a
+    // 1280x880 canvas and re-uploads it to the GPU. Batch them into a single
+    // repaint per tick — three uploads a turn is real memory churn on Quest.
+    if (logFlush) return;
+    logFlush = setTimeout(function () {
+      logFlush = null;
+      emit('sim-log', { lines: vrLog });
+    }, 120);
   }
   window.addEventListener('sim-wait', function () {
     if (busy || !started) return;
@@ -7264,6 +7272,9 @@ if (typeof window !== 'undefined') {
             if (window.__scenarioVoiceAgentId === DEBRIEF_AGENT_ID) who2 = 'debrief';
             else { try { if (/[?&]agent=doctor\b/.test(location.search)) who2 = 'doctor'; } catch (e2) {} }
             appendLog(who2, text);
+            announceSpeaker(who2 === 'debrief' ? 'DEBRIEF NURSE'
+                          : who2 === 'doctor' ? 'DR. OKAFOR'
+                          : ((SCN && SCN.patient && SCN.patient.name) || 'PATIENT').toUpperCase());
           }
         });
       } catch (err) {}
@@ -7430,13 +7441,20 @@ if (typeof window !== 'undefined') {
   // in a headset it reads as a dead room. Drive the sim clock from the wall
   // clock instead, so the case runs whether or not the trainee acts — which
   // is the whole point of a deterioration trainer.
-  var liveTimer = null;
-  var LIVE_TICK_MS = 5000, LIVE_TICK_SECONDS = 5;
+  // Ticks are SILENT: they move physiology, not conversation. Without this the
+  // patient narrates every tick and the case log repaints a 1280x880 canvas
+  // several times per tick — she never shuts up and the texture churn is a
+  // memory problem on a headset. renderTurn checks `autoTick` and only speaks
+  // when something actually changed (new cue, arrest, recovery).
+  var liveTimer = null, autoTick = false, lastCueKey = '';
+  var LIVE_TICK_MS = 10000, LIVE_TICK_SECONDS = 10;
   function startLiveClock() {
     stopLiveClock();
     liveTimer = setInterval(function () {
       if (!started || reported || busy) return;
+      autoTick = true;
       try { PatientLoop.tickTime(LIVE_TICK_SECONDS); } catch (e) {}
+      autoTick = false;
     }, LIVE_TICK_MS);
   }
   function stopLiveClock() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
@@ -7449,9 +7467,20 @@ if (typeof window !== 'undefined') {
   // so they ship as pre-rendered clips in the doctor's voice (assets/doc/):
   // deterministic, no second socket to fight the patient's audio, and no
   // extra latency. Falls back to the on-screen log if a clip is missing.
+  // Who is talking, on the head-locked HUD. Four voices in one room is
+  // confusing without a label — this is the only reliable way to tell them
+  // apart in a headset.
+  var speakerTimer = null;
+  function announceSpeaker(who) {
+    emit('sim-hud', { text: '🔊 ' + who, transient: true });
+    if (speakerTimer) clearTimeout(speakerTimer);
+    speakerTimer = setTimeout(function () { emitHud(); }, 4000);
+  }
+
   var docAudio = null;
   function speakDoctor(index, text) {
     appendLog('doctor', text);
+    announceSpeaker('DR. OKAFOR');
     var src = (SCN && SCN.doctorAudioPrefix) ? (SCN.doctorAudioPrefix + index + '.mp3') : null;
     if (!src) return;
     try {
@@ -7475,9 +7504,18 @@ if (typeof window !== 'undefined') {
         if (due) { nudgesFired[i] = true; speakDoctor(i, n.text); }
       });
     }
-    if (st.patientDialogue) appendLog('patient', st.patientDialogue);
-    if (st.lastAssessment) appendLog('assess', st.lastAssessment);
-    if (st.visibleCues && st.visibleCues.length) appendLog('cue', 'You observe: ' + st.visibleCues.join(', ') + '.');
+    // On an automatic clock tick the patient stays quiet unless the scene
+    // genuinely changed: a new observable cue, or the moment she arrests.
+    // Everything else on a tick is silent physiology (monitor + heart), which
+    // is what "time passing" should look like.
+    var cueKey = (st.visibleCues || []).join('|');
+    var cueChanged = cueKey && cueKey !== lastCueKey;
+    if (!autoTick || cueChanged || st.critical) {
+      if (st.patientDialogue) appendLog('patient', st.patientDialogue);
+      if (st.lastAssessment && !autoTick) appendLog('assess', st.lastAssessment);
+      if (cueChanged) appendLog('cue', 'You observe: ' + st.visibleCues.join(', ') + '.');
+    }
+    if (cueKey) lastCueKey = cueKey;
     if (st.vitals) emit('sim-vitals-update', { vitals: st.vitals, critical: !!st.critical });
     // Scenario end is driven solely by the loop's onEnd -> finish(); never here.
   }
@@ -15749,6 +15787,19 @@ window.MI_SCENARIO = MI_SCENARIO;
           if (k3 >= 1) {
             it.state = 'done';
             group.remove(it.obj);
+            // Free this item's own resources now. ACLS repeats doses, so the
+            // same med can be spawned several times a case; without this the
+            // geometry/material/texture set accumulates until ward unmount.
+            it.obj.traverse(function (o) {
+              if (o.geometry) { try { o.geometry.dispose(); } catch (e) {} }
+              if (o.material) {
+                var ms = Array.isArray(o.material) ? o.material : [o.material];
+                ms.forEach(function (m) {
+                  if (m.map) { try { m.map.dispose(); } catch (e) {} }
+                  try { m.dispose(); } catch (e) {}
+                });
+              }
+            });
             delete items[id];
           }
         }
