@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b12');   // build marker: proves which deploy a run used
+  window.__crumb('boot b13');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -11437,6 +11437,7 @@ if (typeof window !== 'undefined') {
         break;
       case 'client_tool_call': {
         const call = msg.client_tool_call || {};
+        try { window.__crumb && window.__crumb('tool:' + (call.tool_name || '?') + (TOOLS[call.tool_name] ? '' : ' (UNROUTED)')); } catch (e) {}
         const fn = TOOLS[call.tool_name];
         const wants = call.expects_response !== false;
         Promise.resolve()
@@ -11463,6 +11464,12 @@ if (typeof window !== 'undefined') {
 
   // ---- lifecycle ----------------------------------------------------------
   async function doStart() {
+    // Opening the live voice line silences the charge-nurse handoff playback —
+    // two voices at once was unintelligible in-headset.
+    try {
+      if (window.__handoffAudio) window.__handoffAudio.pause();
+      if (window.__handoffCache) for (var hk in window.__handoffCache) { try { window.__handoffCache[hk].pause(); } catch (e2) {} }
+    } catch (e) {}
     // navigator.onLine is NOT a hard gate: on Linux it often reports offline
     // while requests succeed (VM NICs, NetworkManager quirks). Attempt the
     // connection regardless — the socket's own error path reports honestly.
@@ -12214,8 +12221,8 @@ const MI_SCENARIO = {
   // Engine flags for the arrest-as-phase design:
   allowArrestZeros: true,                       // VF/asystole may clamp to true zeros (flatline, asystole heart mode)
   cprInterventionId: 'start-cpr',               // while active on an untreated arrest, decay keyframes pause
-  handoffAudio: 'assets/handoff-mi.mp3',        // charge-nurse brief (pre-generated TTS, Walter Brandt)
-  voiceAgentId: 'agent_0301kzvctvehfmyrztvnmx16kd6d',  // "Walter Brandt - MI sim patient" (ElevenLabs, second account)
+  handoffAudio: 'assets/handoff-mi.mp3',        // charge-nurse brief (pre-generated TTS, Margaret Brandt)
+  voiceAgentId: 'agent_0301kzvctvehfmyrztvnmx16kd6d',  // "Margaret Brandt - MI sim patient" (ElevenLabs, second account)
   title: 'Code in Bay 2',
   subtitle: 'Acute MI to cardiac arrest',
   difficulty: 'Experienced',
@@ -12223,16 +12230,16 @@ const MI_SCENARIO = {
   // --------------------------------------------------------------- PATIENT
   // Fictional patient — any resemblance to a real person is coincidental.
   patient: {
-    name: 'Walter Brandt',
+    name: 'Margaret Brandt',
     age: 61,
-    sex: 'male',
+    sex: 'female',
     weightKg: 92,
     allergies: 'No known drug allergies',
     background:
       '61-year-old male, post-operative day 1 after an elective right total ' +
       'knee replacement under spinal anaesthetic. History: hypertension, ' +
       'type 2 diabetes, dyslipidemia, 30 pack-year smoker (quit 2 years ' +
-      'ago). Home meds include metoprolol and atorvastatin; his aspirin was ' +
+      'ago). Home meds include metoprolol and atorvastatin; her aspirin was ' +
       'held pre-operatively and has not been restarted. Saline-locked IV in ' +
       'the left forearm. Post-op patients with untreated coronary risk ' +
       'factors are a classic setting for perioperative MI, and held ' +
@@ -12242,36 +12249,36 @@ const MI_SCENARIO = {
   // ------------------------------------------------------------------ SBAR
   sbar: {
     situation:
-      'This is Walter Brandt in bay 2, 61-year-old male, post-op day 1 from ' +
-      'a right total knee replacement. He just put his call light on saying ' +
-      'he has a heavy pressure in his chest and he looks grey and sweaty.',
+      'This is Margaret Brandt in bay 2, 61-year-old male, post-op day 1 from ' +
+      'a right total knee replacement. She just put her call light on saying ' +
+      'she has a heavy pressure in her chest and she looks grey and sweaty.',
     background:
       'Elective knee replacement yesterday under spinal, uneventful. ' +
       'Hypertension, type 2 diabetes, high cholesterol, ex-smoker. On ' +
-      'metoprolol and a statin; his home aspirin was held for surgery and ' +
+      'metoprolol and a statin; her home aspirin was held for surgery and ' +
       'has not been restarted. Saline lock in the left forearm, no fluids ' +
       'running. Weighs about 92 kilos.',
     assessment:
-      'Overnight he was fine — heart rate in the 80s, blood pressure around ' +
-      '150 systolic, sats 96% on room air. Right now he is clutching his ' +
+      'Overnight she was fine — heart rate in the 80s, blood pressure around ' +
+      '150 systolic, sats 96% on room air. Right now she is clutching her ' +
       'chest, diaphoretic, and says it feels like "an elephant sitting on ' +
       'me". I have not repeated vitals or done an ECG yet.',
     recommendation:
-      'Please assess him immediately. The 12-lead machine is outside the ' +
+      'Please assess her immediately. The 12-lead machine is outside the ' +
       'bay, the crash cart with the defibrillator is at the nursing ' +
       'station, and the rapid response number is on the wall. I have to ' +
-      'help with a fall in the next room — you have him.'
+      'help with a fall in the next room — you have her.'
   },
 
   // Verbatim brief read to the trainee before the sim starts.
   handoffScript:
-    'You\'re taking over bay 2 — Walter Brandt, 61, day one after a knee ' +
-    'replacement. Hypertensive diabetic ex-smoker, and heads up: his home ' +
-    'aspirin was held for surgery and never restarted. He\'s just rung the ' +
-    'bell with heavy chest pressure, he\'s grey and sweating, and he told ' +
-    'me it feels like an elephant on his chest. Twelve-lead machine is ' +
+    'You\'re taking over bay 2 — Margaret Brandt, 61, day one after a knee ' +
+    'replacement. Hypertensive diabetic ex-smoker, and heads up: her home ' +
+    'aspirin was held for surgery and never restarted. She\'s just rung the ' +
+    'bell with heavy chest pressure, she\'s grey and sweating, and she told ' +
+    'me it feels like an elephant on her chest. Twelve-lead machine is ' +
     'right outside, crash cart\'s at the station. I\'ve got a fall next ' +
-    'door — he\'s all yours.',
+    'door — she\'s all yours.',
 
   // What the trainee must recognize; never shown to them.
   hiddenCondition:
@@ -12291,7 +12298,7 @@ const MI_SCENARIO = {
   // Sits on the t=0s keyframe below.
   initialVitals: {
     hr: 104,      // beats/min — sinus tachycardia despite home beta-blocker
-    sbp: 158,     // mmHg — pain/catecholamine surge above his 150 baseline
+    sbp: 158,     // mmHg — pain/catecholamine surge above her 150 baseline
     dbp: 94,      // mmHg
     spo2: 96,     // % on room air — oxygen not indicated (>=90, ACC/AHA 2025)
     rr: 22,       // breaths/min
@@ -12342,7 +12349,7 @@ const MI_SCENARIO = {
         cues: ['Monitor shows occasional PVCs; patient pale, restless; "something is really wrong".',
                'If the 12-lead has been run: ST elevation in II, III, aVF with reciprocal depression in I and aVL — inferior STEMI.'] },
       { atSeconds: 180, vitals: { hr: 124, sbp: 128, dbp: 78, spo2: 93, rr: 28 },
-        cues: ['Frequent PVCs, now in couplets and a short run of VT; BP sliding DOWN (now 30 mmHg below his baseline — nitrate window has closed, ACC/AHA 2013); says "I think I\'m going to die".'],
+        cues: ['Frequent PVCs, now in couplets and a short run of VT; BP sliding DOWN (now 30 mmHg below her baseline — nitrate window has closed, ACC/AHA 2013); says "I think I\'m going to die".'],
         dialogue: '"My chest... I can\'t... it\'s crushing me..."' },
       // ----- ARREST: primary VF. critical:false — the sim MUST keep running.
       { atSeconds: 200, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 90, rr: 0 },
@@ -12370,7 +12377,7 @@ const MI_SCENARIO = {
       { atSeconds: 60,  vitals: { hr: 112, sbp: 94, dbp: 58, spo2: 91, rr: 10 },
         cues: ['Colour returning; spontaneous breaths resuming; groans to voice. Titrate O2 toward SpO2 92-98% (AHA 2020 post-ROSC).'] },
       { atSeconds: 120, vitals: { hr: 102, sbp: 106, dbp: 64, spo2: 95, rr: 14 },
-        cues: ['Sinus rhythm with residual inferior ST elevation on repeat 12-lead — he still needs the cath lab (ACC/AHA 2025: reperfusion after ROSC with STEMI).'] },
+        cues: ['Sinus rhythm with residual inferior ST elevation on repeat 12-lead — she still needs the cath lab (ACC/AHA 2025: reperfusion after ROSC with STEMI).'] },
       { atSeconds: 180, vitals: { hr: 96, sbp: 112, dbp: 68, spo2: 96, rr: 16 },
         dialogue: '"...what happened? My chest still hurts..."',
         cues: ['Awake, confused but following commands. Package for the cath lab: monitor on, defib pads stay on, handover ready.'] }
@@ -12419,7 +12426,7 @@ const MI_SCENARIO = {
       id: 'aspirin',
       label: 'Aspirin 162-325 mg non-enteric-coated, chewed',
       aliases: ['give aspirin', 'asa', 'chew an aspirin', 'three twenty five of aspirin',
-                'baby aspirins', 'give him asa to chew'],
+                'baby aspirins', 'give her asa to chew'],
       correct: true,
       requiresRationale: true,
       effect: {
@@ -12431,7 +12438,7 @@ const MI_SCENARIO = {
         definitive: false,
         onsetSeconds: 60,
         note: 'Chewed non-enteric-coated tablets for fastest absorption. ' +
-              'His home aspirin was held post-op — this is the gap to spot.'
+              'Her home aspirin was held post-op — this is the gap to spot.'
       },
       clinicalNote:
         'Aspirin 162-325 mg chewed as soon as possible in suspected ACS ' +
@@ -12467,7 +12474,7 @@ const MI_SCENARIO = {
       id: 'oxygen-titrated',
       label: 'Oxygen — ONLY if SpO2 <90%, titrated (post-ROSC target 92-98%)',
       aliases: ['give oxygen', 'put on oxygen', 'nasal cannula', 'titrate the O2',
-                'oxygen if his sats drop', 'sats-guided oxygen'],
+                'oxygen if her sats drop', 'sats-guided oxygen'],
       correct: true,
       requiresRationale: true,
       effect: {
@@ -12480,7 +12487,7 @@ const MI_SCENARIO = {
         onsetSeconds: 30,
         note: 'Routine oxygen in normoxic ACS shows no benefit and possible ' +
               'harm (larger infarcts). The correct verbalization is ' +
-              '"oxygen only if his sats fall below 90".'
+              '"oxygen only if her sats fall below 90".'
       },
       clinicalNote:
         'Supplemental oxygen only for SpO2 <90% in ACS — trials in ' +
@@ -12500,7 +12507,7 @@ const MI_SCENARIO = {
           'CONDITIONAL HARM. This patient has an inferior STEMI with RV ' +
           'involvement (preload-dependent): even a "safe-window" dose drops ' +
           'SBP 20-30 mmHg within 60 s. Given early (SBP >=90 and not yet 30 ' +
-          'below his 158 baseline, checks verbalized) it is defensible and ' +
+          'below her 158 baseline, checks verbalized) it is defensible and ' +
           'scored as correct-with-caution; the V4R finding should make the ' +
           'trainee WITHHOLD it. After ~180 s (SBP 128 = 30 below baseline) ' +
           'it routes to the nitro-when-hypotensive harm effect instead.',
@@ -12545,7 +12552,7 @@ const MI_SCENARIO = {
       id: 'start-cpr',
       label: 'Start high-quality chest compressions',
       aliases: ['start compressions', 'start cpr', 'begin compressions',
-                'pump his chest', 'get on the chest', 'compressions now',
+                'pump her chest', 'get on the chest', 'compressions now',
                 'hands on the chest'],
       correct: true,
       requiresRationale: false,
@@ -12571,7 +12578,7 @@ const MI_SCENARIO = {
     {
       id: 'defibrillate',
       label: 'Defibrillate — biphasic 120-200 J per manufacturer (max if unknown)',
-      aliases: ['shock him', 'charge the defib', 'defibrillate', 'deliver a shock',
+      aliases: ['shock her', 'charge the defib', 'defibrillate', 'deliver a shock',
                 'clear and shock', 'charge to two hundred', 'shock at max',
                 'all clear, shocking'],
       correct: true,
@@ -12653,8 +12660,8 @@ const MI_SCENARIO = {
     {
       id: 'precordial-thump-only',
       label: 'Precordial thump instead of defibrillation',
-      aliases: ['thump his chest', 'precordial thump', 'fist to the sternum',
-                'whack his chest'],
+      aliases: ['thump her chest', 'precordial thump', 'fist to the sternum',
+                'whack her chest'],
       correct: false,
       requiresRationale: true,
       effect: {
@@ -12678,7 +12685,7 @@ const MI_SCENARIO = {
       id: 'nitro-when-hypotensive',
       label: 'Give nitroglycerin despite hypotension / falling BP',
       aliases: ['nitro anyway', 'another nitro', 'nitro despite the pressure',
-                'give nitro now his pressure is low'],
+                'give nitro now her pressure is low'],
       correct: false,
       requiresRationale: true,
       effect: {
@@ -12689,7 +12696,7 @@ const MI_SCENARIO = {
           'already <80, triggers immediate arrest.',
         definitive: false,
         onsetSeconds: 30,
-        note: 'By 180 s his SBP (128) is already 30 mmHg below his 158 ' +
+        note: 'By 180 s her SBP (128) is already 30 mmHg below her 158 ' +
               'baseline — the contraindication threshold has been crossed ' +
               'even though 128 "looks fine".'
       },
@@ -12952,27 +12959,27 @@ const MI_SCENARIO = {
   //   event and play in listed order if the situation persists.
   doctorNudges: [
     { atSeconds: 20,  intensity: 1,
-      text: 'He\'s grey, he\'s soaked through the gown, and he\'s holding a fist to his sternum. What\'s your read on this?' },
+      text: 'She\'s grey, she\'s soaked through the gown, and she\'s holding a fist to her sternum. What\'s your read on this?' },
     { atSeconds: 70,  intensity: 2,
       text: 'Day one post-op, diabetic, ex-smoker, crushing chest pressure. What\'s the one bedside test that sorts this out in the next few minutes?' },
     { atSeconds: 110, intensity: 2,
-      text: 'If this is his heart — is there a tablet you want in his mouth right now? Think about what got held for surgery.' },
+      text: 'If this is her heart — is there a tablet you want in her mouth right now? Think about what got held for surgery.' },
     { atSeconds: 150, intensity: 3,
-      text: 'ST elevation in two, three and aVF. Before anyone reaches for the nitro spray — which extra lead do you want, and what\'s his pressure doing compared to baseline?' },
+      text: 'ST elevation in two, three and aVF. Before anyone reaches for the nitro spray — which extra lead do you want, and what\'s her pressure doing compared to baseline?' },
     { atSeconds: 185, intensity: 1,
       text: 'Watch that monitor. Those runs of ectopy are the ventricle telling you it\'s irritable.' },
     { onEvent: 'arrest', intensity: 2,
-      text: 'He\'s down. Look at the monitor — what rhythm is that, and what does that rhythm need?' },
+      text: 'She\'s down. Look at the monitor — what rhythm is that, and what does that rhythm need?' },
     { onEvent: 'arrest', intensity: 3,
-      text: 'That\'s a shockable rhythm and there\'s a defibrillator ten feet away. What happens to his odds with every minute that thing stays on the cart? And what are your hands doing in the meantime?' },
+      text: 'That\'s a shockable rhythm and there\'s a defibrillator ten feet away. What happens to her odds with every minute that thing stays on the cart? And what are your hands doing in the meantime?' },
     { onEvent: 'cpr-started', intensity: 1,
       text: 'Good — stay over the chest. Hundred to one-twenty a minute, five to six centimetres, let it recoil. Nobody stops unless the rhythm check says so.' },
     { onEvent: 'shock-delivered', intensity: 2,
       text: 'Shock\'s in. What goes back on the chest right now, and for how long before you look at the monitor again?' },
     { onEvent: 'refractory-vf', intensity: 3,
-      text: 'Two shocks and he\'s still fibrillating. Is there a drug this algorithm has been waiting for — and how often does it repeat?' },
+      text: 'Two shocks and she\'s still fibrillating. Is there a drug this algorithm has been waiting for — and how often does it repeat?' },
     { onEvent: 'post-rosc', intensity: 2,
-      text: 'We\'ve got a pulse. What number are you titrating his oxygen to — and where does a post-arrest STEMI need to be in the next thirty minutes?' }
+      text: 'We\'ve got a pulse. What number are you titrating her oxygen to — and where does a post-arrest STEMI need to be in the next thirty minutes?' }
   ],
 
   // ------------------------------------------------------------ HEART STATES
@@ -13007,7 +13014,7 @@ if (typeof window !== 'undefined') {
   
 // Engine gate (see patient-loop arrest-only check): indicated only in arrest.
 MI_SCENARIO.arrestOnlyInterventions = ['defibrillate', 'epinephrine-iv-1mg', 'amiodarone-iv-300', 'start-cpr'];
-MI_SCENARIO.prematureInterventionNote = 'He still has a pulse and a perfusing rhythm — that is not indicated right now and could cause harm. What does this rhythm actually need?';
+MI_SCENARIO.prematureInterventionNote = 'She still has a pulse and a perfusing rhythm — that is not indicated right now and could cause harm. What does this rhythm actually need?';
 
 window.MI_SCENARIO = MI_SCENARIO;
 } else if (typeof module !== 'undefined' && module.exports) {
