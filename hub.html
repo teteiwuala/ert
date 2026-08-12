@@ -4384,6 +4384,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   } catch (e) {}
 
   let vrui = null, pInteract = null, heartViz = null, savedCPRView = null;
+  // While true, the animation loop renders nothing: the ward was just built
+  // and its shader programs are still compiling. Rendering immediately would
+  // compile them all synchronously in one frame — a multi-second GPU stall
+  // that the Quest OS answers by killing the browser ("browser has stopped").
+  let wardWarming = false;
   function mountWard(scn) {
     if (ward || typeof window.makeWardScene !== 'function') return;
     // Hide every current hub object except the camera rig; remember visibility.
@@ -4441,6 +4446,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } catch (err) { /* interaction layer optional */ }
   }
   function unmountWard() {
+    wardWarming = false;
     try { if (window.WardAudio) window.WardAudio.stop(); } catch (e) {}
     if (wardFx)    { try { wardFx.dispose(); }    catch (e) {} wardFx = null; }
     if (wardProps) { try { wardProps.dispose(); } catch (e) {} wardProps = null; }
@@ -4490,7 +4496,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (ward && ward.bedsideAnchor) { const a = ward.bedsideAnchor(); pos = { x: a.x, y: a.y, z: a.z }; }
       vitalsMon = window.makeVitalsMonitor(THREE, scene, { position: pos, normalRanges: nr, faceTarget: camera });
     }
-    if (cine && ward) cine.enterWard(cineRefs, { from: CINE_FROM, to: CINE_TO, durationMs: 2600 });
+    // Pre-compile the ward's shaders off the render path before showing a
+    // single frame of it (parallel compile in the driver via compileAsync;
+    // sync compile fallback still beats compiling mid-XR-frame). The loop
+    // idles on wardWarming meanwhile — a moment of black, never a stall.
+    wardWarming = true;
+    let warmed = false;
+    const finishWarm = function () {
+      if (warmed) return; warmed = true;
+      wardWarming = false;
+      if (cine && ward) cine.enterWard(cineRefs, { from: CINE_FROM, to: CINE_TO, durationMs: 2600 });
+    };
+    try {
+      if (typeof renderer.compileAsync === 'function') {
+        renderer.compileAsync(scene, camera).then(finishWarm, finishWarm);
+        setTimeout(finishWarm, 4000);   // backstop: never leave the screen black
+      } else {
+        try { renderer.compile(scene, camera); } catch (err) {}
+        finishWarm();
+      }
+    } catch (err) { finishWarm(); }
     // Soundscape: sim-vitals-show is dispatched synchronously from the Begin
     // click, so start() runs inside the user gesture as Web Audio requires.
     if (window.WardAudio) { try { window.WardAudio.start(); } catch (err) {} }
@@ -4613,6 +4638,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   renderer.setAnimationLoop((t) => {
     const presenting = renderer.xr.isPresenting;
     if (!presenting) { if (document.hidden) return; if (t - flatLast < 33) return; flatLast = t; }
+    if (wardWarming) return;   // ward shaders still compiling — see mountWard
     try {
     const now = (t - t0) / 1000;
 
