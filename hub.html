@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b11');   // build marker: proves which deploy a run used
+  window.__crumb('boot b12');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4107,7 +4107,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     { id: 'assess', title: 'Patient\nAssessment',        diff: 'Student',      score: 82,
       blurb: 'Head-to-toe · subtle deterioration' },
     { id: 'emerg',  title: 'Emergency\nResponse',        diff: 'Experienced',  score: null,
-      blurb: 'Code blue · anaphylaxis · sepsis' },
+      blurb: 'Anaphylaxis · airway · shock' },
+    { id: 'cardiac', title: 'Code Blue\nResponse',       diff: 'Experienced',  score: null,
+      blurb: 'STEMI · VF arrest · ACLS' },
     { id: 'periop', title: 'Perioperative\nSupport',     diff: 'New Grad',     score: 74,
       blurb: 'Pre-op · sterile field · post-op' },
   ];
@@ -5621,7 +5623,11 @@ if (typeof window !== 'undefined') {
       var r = VITAL_RANGES[k];
       var raw = (v && typeof v[k] === 'number' && isFinite(v[k])) ? v[k] : current[k];
       if (typeof raw !== 'number' || !isFinite(raw)) raw = (r.min + r.max) / 2;
-      var val = Math.min(r.max, Math.max(r.min, raw));
+      // Arrest-capable scenarios need true zeros (flatline ECG, asystole heart
+      // mode); the floors otherwise render "VF" as a 20 bpm perfusing rhythm.
+      var lo = (scenario && scenario.allowArrestZeros &&
+                (k === 'hr' || k === 'sbp' || k === 'dbp' || k === 'rr')) ? 0 : r.min;
+      var val = Math.min(r.max, Math.max(lo, raw));
       out[k] = r.int ? Math.round(val) : Math.round(val * 10) / 10;
     }
     return out;
@@ -5892,6 +5898,13 @@ if (typeof window !== 'undefined') {
             'Not indicated — the patient has a pulse and a perfusing rhythm. Reassess before acting.');
         } else {
         gameState.vitals = clampVitals(applyVitalChanges(gameState.vitals, entry));
+        // CPR is time-buying, not curative: mark it active so progression
+        // pauses (below) until the definitive shock flips the trajectory.
+        if (scenario.cprInterventionId && entry.id === scenario.cprInterventionId) {
+          gameState.cprActive = true;
+          assessmentParts.push('High-quality compressions are perfusing the brain and heart — ' +
+            'deterioration is held, not reversed. The rhythm still needs defibrillation.');
+        }
         if (isDefinitiveIntervention(entry)) {
           if (!gameState.epinephrineGiven) {
             gameState.epinephrineGiven = true;
@@ -5939,6 +5952,14 @@ if (typeof window !== 'undefined') {
       if (cbFired.dialogue) dialogue = cbFired.dialogue;
       if (cbFired.cues) cues = cbFired.cues.slice();
       assessmentParts.push(cbFired.assessment);
+    }
+
+    // CPR pause: while compressions run on an untreated arrest, push the decay
+    // keyframes back by exactly the time that passes (negative shift = later),
+    // so hypoxic deterioration holds until a shock flips the trajectory. If
+    // CPR never starts, the scripted decay marches to asystole unchanged.
+    if (gameState.cprActive && gameState.trajectory === 'untreated') {
+      gameState.collapseShiftSeconds = (gameState.collapseShiftSeconds || 0) - advanceSeconds;
     }
 
     // 2. Apply time-based progression on the current trajectory.
@@ -6862,13 +6883,14 @@ if (typeof window !== 'undefined') {
   window.addEventListener('launch-scenario', function (e) {
     var panel = e.detail || {};
     try { if (window.__crumb) window.__crumb('module-tap:' + (panel.id || '?')); } catch (err) {}
-    if (panel.id !== 'emerg') {
+    var SCENARIO_BY_PANEL = { emerg: window.ANAPHYLAXIS_SCENARIO, cardiac: window.MI_SCENARIO };
+    var picked = SCENARIO_BY_PANEL[panel.id];
+    if (!picked) {
       toast('“' + String(panel.title || 'This module').replace('\n', ' ') +
-        '” is coming soon — the Emergency Response case is the live build.');
+        '” is coming soon — Emergency Response and Code Blue are the live builds.');
       return;
     }
-    SCN = window.MI_SCENARIO || window.ANAPHYLAXIS_SCENARIO;
-    if (!SCN) { toast('Scenario data failed to load.'); return; }
+    SCN = picked;
     if (started) return;
     // IN-HEADSET PATH: DOM overlays are invisible in an immersive session,
     // and the key gate's input.focus() summons the system keyboard — which
@@ -7018,12 +7040,17 @@ if (typeof window !== 'undefined') {
     // handoffScript text verbatim, in a third voice distinct from the patient
     // and the doctor). This is the in-headset replacement for the DOM brief,
     // and desktop hears it too after clicking Begin.
+    // Per-scenario patient voice (Maya by default; Walter for the cardiac
+    // case). Read by VoiceBridge at socket-open time; ?agent= still wins.
+    window.__scenarioVoiceAgentId = SCN.voiceAgentId || null;
     try {
-      if (window.__handoffAudio) {
-        window.__handoffAudio.currentTime = 0;
-        window.__handoffAudio.play().then(function () { window.__crumb('handoff-audio'); },
-                                          function () {});
-      }
+      var hsrc = SCN.handoffAudio || 'assets/handoff.mp3';
+      window.__handoffCache = window.__handoffCache || {};
+      var ha = window.__handoffCache[hsrc] ||
+               (hsrc === 'assets/handoff.mp3' && window.__handoffAudio) || new Audio(hsrc);
+      window.__handoffCache[hsrc] = ha;
+      ha.currentTime = 0;
+      ha.play().then(function () { window.__crumb('handoff-audio'); }, function () {});
     } catch (err) {}
     if (window.DoctorLink) {
       try {
@@ -7121,7 +7148,7 @@ if (typeof window !== 'undefined') {
     var arrested = (v.hr <= 30 || v.sbp <= 40);
     if (arrested) mode = cprOn ? 'cpr' : (v.hr <= 5 ? 'asystole' : 'vf');
     else if (st.trajectory === 'treated') mode = 'rosc';
-    else if (SCN && SCN.id === 'emerg' && (v.sbp < 118 || st.timeElapsedSeconds > 60)) mode = 'ischemia';
+    else if (SCN && (SCN.id === 'emerg' || SCN.id === 'cardiac') && (v.sbp < 118 || st.timeElapsedSeconds > 60)) mode = 'ischemia';
     else mode = 'baseline';
     emit('sim-heart-state', { mode: mode, hr: Math.max(v.hr, mode === 'vf' ? 0 : v.hr),
       contractility: Math.max(0, Math.min(1, v.sbp / 130)) });
@@ -11126,7 +11153,14 @@ if (typeof window !== 'undefined') {
   })();
   const AGENT_ID = AGENT_PARAM === 'doctor' ? DOCTOR_AGENT_ID
                  : (AGENT_PARAM || PATIENT_AGENT_ID);
-  const WS_URL = 'wss://api.elevenlabs.io/v1/convai/conversation?agent_id=' + AGENT_ID;
+  // Late-bound so each scenario can bring its own patient voice (Maya default,
+  // Walter for the cardiac case) via window.__scenarioVoiceAgentId, set in
+  // beginCase. The ?agent= URL param always takes precedence.
+  function wsUrl() {
+    const id = AGENT_PARAM === 'doctor' ? DOCTOR_AGENT_ID
+             : (AGENT_PARAM || window.__scenarioVoiceAgentId || PATIENT_AGENT_ID);
+    return 'wss://api.elevenlabs.io/v1/convai/conversation?agent_id=' + id;
+  }
   const TARGET_RATE = 16000;          // pcm_16000 both directions
   const SEND_EVERY_SAMPLES = 1600;    // ~100 ms of 16 kHz mono
 
@@ -11447,7 +11481,7 @@ if (typeof window !== 'undefined') {
       return;
     }
     try {
-      ws = new WebSocket(WS_URL);
+      ws = new WebSocket(wsUrl());
     } catch (e) {
       fail('Could not reach the voice agent.');
       await teardown();
@@ -12176,7 +12210,12 @@ if (typeof window !== 'undefined') {
  */
 
 const MI_SCENARIO = {
-  id: 'emerg',                                  // matches the hub panel id
+  id: 'cardiac',                                // matches the hub panel id
+  // Engine flags for the arrest-as-phase design:
+  allowArrestZeros: true,                       // VF/asystole may clamp to true zeros (flatline, asystole heart mode)
+  cprInterventionId: 'start-cpr',               // while active on an untreated arrest, decay keyframes pause
+  handoffAudio: 'assets/handoff-mi.mp3',        // charge-nurse brief (pre-generated TTS, Walter Brandt)
+  voiceAgentId: 'agent_0301kzvctvehfmyrztvnmx16kd6d',  // "Walter Brandt - MI sim patient" (ElevenLabs, second account)
   title: 'Code in Bay 2',
   subtitle: 'Acute MI to cardiac arrest',
   difficulty: 'Experienced',
@@ -12787,10 +12826,12 @@ const MI_SCENARIO = {
     //    2-3 minutes (AHA 2020: survival falls with each minute of delay).
     //  - Aspirin + 12-lead inside phase 1 (ECG <=10 min of contact is the
     //    guideline ceiling; this sim expects it far faster).
+    // NOTE: the debrief's headline metric is the FIRST timeTo*TargetSeconds
+    // key — defibrillation is the outcome-defining action, so it leads.
+    timeToDefibrillationTargetSeconds: 260, // collapse 200 s + 60 s
+    timeToCprTargetSeconds: 215,            // collapse 200 s + 15 s
     timeToEcgTargetSeconds: 120,
     timeToAspirinTargetSeconds: 150,
-    timeToCprTargetSeconds: 215,            // collapse 200 s + 15 s
-    timeToDefibrillationTargetSeconds: 260, // collapse 200 s + 60 s
     criteria: [
       { id: 'notice-acs-cluster',
         dimension: 'notice',
