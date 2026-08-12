@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b21');   // build marker: proves which deploy a run used
+  window.__crumb('boot b22');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5037,7 +5037,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 21 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 22 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7485,6 +7485,8 @@ if (typeof window !== 'undefined') {
     if (!src) return;
     try {
       if (docAudio) { docAudio.pause(); }
+      // Never talk over the charge nurse's handoff — one voice at a time.
+      try { for (var hk in (window.__handoffCache || {})) window.__handoffCache[hk].pause(); } catch (e2) {}
       docAudio = new Audio(src);
       docAudio.play().then(function () { window.__crumb('doc-voice:' + index); }, function () {});
     } catch (err) {}
@@ -12654,8 +12656,13 @@ if (typeof window !== 'undefined') {
         canvas.width = CANVAS_W; canvas.height = CANVAS_H;
         var tex = track(new THREE.CanvasTexture(canvas));
         tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = (renderer && renderer.capabilities)
-          ? renderer.capabilities.getMaxAnisotropy() : 1;
+        // No mipmaps: the panel is a flat quad viewed near head-on, so mips
+        // buy nothing — but they make every repaint regenerate a full mip
+        // chain on top of a 4.5 MB upload. (The vitals monitor already does
+        // this for the same reason.)
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.anisotropy = 1;
         var mat = track(new THREE.MeshBasicMaterial({
           map: tex, transparent: true, side: THREE.DoubleSide,
           fog: false, depthWrite: false
@@ -12797,6 +12804,7 @@ if (typeof window !== 'undefined') {
     // TOUCH_DEPTH is generous on the near side because fingers arrive with
     // some overshoot; the panel is only ~1 cm of visual thickness.
     var TOUCH_DEPTH = 0.055;
+    var touchHover = null;      // set by hoverButton(), consumed by update()
     var tmpLocal = new THREE.Vector3();
     function touchAt(worldPos) {
       var best = null, bestDist = Infinity;
@@ -12921,7 +12929,11 @@ if (typeof window !== 'undefined') {
         hud.mesh.lookAt(tmpV1);
       }
 
-      // button hover highlights (both controllers, XR only)
+      // Button hover highlights (XR only). SINGLE WRITER: the ray hits and the
+      // fingertip touch are merged here before anything repaints. When touch
+      // hover was applied separately the two disagreed every frame and each
+      // flipped hoveredIdx back — two full 1280x880 canvas repaints and
+      // texture re-uploads per frame (~865 MB/s), which OOM-killed the Quest.
       if (renderer && renderer.xr && renderer.xr.isPresenting) {
         var hoverByPanel = {};
         for (var i = 0; i < controllers.length; i++) {
@@ -12929,6 +12941,9 @@ if (typeof window !== 'undefined') {
           if (hit && hit.button) {
             hoverByPanel[hit.rec.mesh.userData.vruiPanelId] = hit.button.index;
           }
+        }
+        if (touchHover && touchHover.button && touchHover.rec) {
+          hoverByPanel[touchHover.rec.mesh.userData.vruiPanelId] = touchHover.button.index;
         }
         for (var id in panels) {
           var rec = panels[id];
@@ -12973,13 +12988,8 @@ if (typeof window !== 'undefined') {
         hit.button.onSelect();
         return true;
       },
-      hoverButton: function (hit) {
-        // Repaint only on change: canvas repaints are the expensive part.
-        for (var id in panels) {
-          var want = (hit && hit.rec === panels[id] && hit.button) ? hit.button.index : -1;
-          if (panels[id].hoveredIdx !== want) drawPanel(panels[id], want);
-        }
-      },
+      // Records the fingertip's hover; update() is the only thing that paints.
+      hoverButton: function (hit) { touchHover = hit; },
       _panels: panels   // exposed for tests / debugging
     };
   };
