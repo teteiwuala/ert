@@ -3929,11 +3929,23 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   // with it. So journal each launch stage into localStorage (survives the
   // crash) and report the previous run's last stage on the next boot. A
   // 'clean-exit' crumb on pagehide separates crashes from normal leaves.
+  var CRUMB_SEQ = 0;
   window.__crumb = function (s) {
     try {
       var a = JSON.parse(localStorage.getItem('quest-crumbs') || '[]');
       a.push(s);
       localStorage.setItem('quest-crumbs', JSON.stringify(a.slice(-30)));
+    } catch (e) {}
+    // Also stream each crumb OFF the device (fire-and-forget, keepalive so it
+    // survives page teardown): a hard OS kill loses localStorage's last
+    // seconds of writes, but a request that already left the headset is safe.
+    // Temporary debug channel — remove after the Quest crash is solved.
+    try {
+      fetch('https://ntfy.sh/ert-quest-blackbox-c7q4x9', {
+        method: 'POST',
+        body: (++CRUMB_SEQ) + ' ' + Math.round(performance.now()) + 'ms ' + s,
+        keepalive: true
+      }).catch(function () {});
     } catch (e) {}
   };
   window.addEventListener('pagehide', function () { window.__crumb('clean-exit'); });
@@ -4273,6 +4285,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     inputs.push(rec);
   }
   function xrPick(ctrl) {
+    window.__crumb('xr-pick');
     tmpM.identity().extractRotation(ctrl.matrixWorld);
     xrRay.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
     xrRay.ray.direction.set(0,0,-1).applyMatrix4(tmpM).normalize();
