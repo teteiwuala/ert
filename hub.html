@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot');
+  window.__crumb('boot b9');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4318,6 +4318,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // Grip buttons drive the in-case controls (nothing else uses squeeze):
     // LEFT grip opens the case menu, RIGHT grip toggles the voice loop.
     ctrl.addEventListener('squeezestart', () => {
+      window.__crumb('grip:' + (rec.hand || '?') + (ward ? '' : ' (lobby, ignored)'));
       if (!ward) return;
       if (rec.hand === 'left') window.dispatchEvent(new CustomEvent('sim-case-menu'));
       else window.dispatchEvent(new CustomEvent('sim-voice-toggle'));
@@ -4834,7 +4835,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (wardFx) wardFx.update(dt, now);
     if (vitalsMon && latestVitals) vitalsMon.update(latestVitals, now);
     renderer.render(scene, camera);
-    if (wardJustWarmed) { wardJustWarmed = false; window.__crumb('first-ward-frame-ok'); }
+    if (wardJustWarmed) {
+      wardJustWarmed = false; window.__crumb('first-ward-frame-ok');
+      try {
+        const cw = new THREE.Vector3(); camera.getWorldPosition(cw);
+        window.__crumb('heights rig.y=' + rig.position.y.toFixed(2) + ' eye.y=' + cw.y.toFixed(2) + (renderer.xr.isPresenting ? ' (XR)' : ' (flat)'));
+      } catch (hErr) {}
+    }
     } catch (loopErr) {
       // One bad frame must not stop the animation loop: three.js schedules
       // the next frame AFTER the callback returns, so an uncaught throw here
@@ -11130,11 +11137,13 @@ if (typeof window !== 'undefined') {
   function setState(s) {
     if (state === s) return;
     state = s;
+    try { window.__crumb && window.__crumb('voice:' + s); } catch (e) {}
     try { cb.onStatus(s); } catch (e) {}
   }
 
   // Surface a failure exactly once per session; never throw.
   function fail(msg) {
+    try { window.__crumb && window.__crumb('voice-fail: ' + msg); } catch (e) {}
     setState('error');
     if (reportedFailure) return;
     reportedFailure = true;
@@ -11834,7 +11843,10 @@ if (typeof window !== 'undefined') {
       drawPanel(rec, -1);
       // Reposition only when newly shown: repainting an already-open panel
       // (streaming dialogue updates) must not yank it to the current gaze.
-      if (!rec.group.visible || !rec.placed) { placePanel(rec.group); rec.placed = true; }
+      if (!rec.group.visible || !rec.placed) {
+        placePanel(rec.group); rec.placed = true;
+        try { window.__crumb && window.__crumb('panel ' + id + ' y=' + rec.group.position.y.toFixed(2)); } catch (e) {}
+      }
       rec.group.visible = true;
       return rec;
     }
