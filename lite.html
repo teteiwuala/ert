@@ -1125,12 +1125,31 @@ var vrPatient=null, vrMon=null, vrHeart=null, vrCap=null, vrBtns=null, vrRay=nul
 function texCanvas(w,h){ var c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
 function buildVRScene(){
   if(typeof THREE==='undefined'){ say('bad','NOTE','3D engine failed to load.'); return false; }
-  vrRenderer=new THREE.WebGLRenderer({ antialias:false, alpha:false, powerPreference:'high-performance' });
-  vrRenderer.setPixelRatio(1); vrRenderer.setSize(window.innerWidth, window.innerHeight);
+  // Memory-constrained GPUs (Quest / standalone-VR browsers, phones) OOM-kill the
+  // tab at full DPR + MSAA. Detect them and spend less VRAM.
+  var LOW_GPU=(function(){
+    try{
+      var ua=navigator.userAgent||'';
+      if(/OculusBrowser|Quest|Pico|Wolvic|VR/i.test(ua)) return true;
+      if(/Mobi|Android|iPhone|iPad|iPod/i.test(ua)) return true;
+      if(typeof navigator.deviceMemory==='number' && navigator.deviceMemory<=4) return true;
+    }catch(e){ return true; }
+    return false;
+  })();
+  window.__LOW_GPU=LOW_GPU;
+  vrRenderer=new THREE.WebGLRenderer({ antialias:!LOW_GPU, alpha:false, powerPreference:'high-performance' });
+  vrRenderer.setPixelRatio(LOW_GPU ? 0.75 : Math.min(window.devicePixelRatio, 2)); vrRenderer.setSize(window.innerWidth, window.innerHeight);
   vrRenderer.outputColorSpace=THREE.SRGBColorSpace; vrRenderer.xr.enabled=true;
-  try{ if(vrRenderer.xr.setFramebufferScaleFactor) vrRenderer.xr.setFramebufferScaleFactor(0.7); }catch(e){}
+  // Below-native eye buffers on low-memory GPUs; must be set before any XR session starts.
+  try{ if(LOW_GPU && vrRenderer.xr.setFramebufferScaleFactor) vrRenderer.xr.setFramebufferScaleFactor(0.7); }catch(e){}
   vrRenderer.domElement.id='vrcanvas'; vrRenderer.domElement.style.cssText='position:fixed;inset:0;z-index:30';
   document.body.appendChild(vrRenderer.domElement);
+  // Quest kills WebGL contexts under memory pressure; preventDefault or it can
+  // never be restored — and tell the user instead of leaving a black void.
+  vrRenderer.domElement.addEventListener('webglcontextlost', function(e){
+    e.preventDefault();
+    try{ say('bad','NOTE','Graphics context lost — reload the page to continue.'); }catch(err){}
+  });
 
   vrScene=new THREE.Scene(); vrScene.background=new THREE.Color(0x090c11); vrScene.fog=new THREE.Fog(0x090c11,4,15);
   vrCamera=new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.05, 60);
