@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b9');   // build marker: proves which deploy a run used
+  window.__crumb('boot b10');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4601,7 +4601,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       wardWarming = false;
       wardJustWarmed = true;
       window.__crumb('warm-done');
-      if (cine && ward) cine.enterWard(cineRefs, { from: CINE_FROM, to: CINE_TO, durationMs: 2600 });
+      if (renderer.xr.isPresenting) {
+        // VR: no camera choreography — Cinematic parks the rig at desktop eye
+        // height even when it skips the motion (proven by telemetry: rig.y
+        // ended at 1.62 in-headset → eye at 3.1 m, floating above the ward).
+        rig.position.set(0.15, 0, 2.45); yaw = 0; pitch = -0.10; applyLook();
+      } else if (cine && ward) {
+        cine.enterWard(cineRefs, { from: CINE_FROM, to: CINE_TO, durationMs: 2600 });
+      }
     };
     try {
       if (typeof renderer.compileAsync === 'function') {
@@ -11805,7 +11812,10 @@ if (typeof window !== 'undefined') {
       var yaw = tmpE.y;                               // horizontal gaze
       tmpV2.set(0, 0, -1).applyAxisAngle(UP, yaw);    // level forward
       group.position.copy(tmpV1).addScaledVector(tmpV2, PANEL_DIST);
-      group.position.y = tmpV1.y;                     // head height
+      // Head height, clamped to a sane band: during the mount frame the XR
+      // camera pose may not be valid yet (y≈0 put panels in the floor), and
+      // a mis-parked rig once put heads at 3 m (panels in the sky).
+      group.position.y = Math.min(2.2, Math.max(1.1, tmpV1.y));
       group.rotation.set(0, yaw, 0);                  // vertical, facing user
     }
 
