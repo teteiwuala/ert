@@ -4004,8 +4004,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
-  renderer.xr.addEventListener('sessionstart', function () { window.__xrPresenting = true; window.__crumb('xr-session-start'); });
-  renderer.xr.addEventListener('sessionend', function () { window.__xrPresenting = false; window.__crumb('xr-session-end'); });
+  // Reference-space correction: on desktop the rig Y IS eye height (camera
+  // sits at the rig origin), but in a local-floor XR session the headset adds
+  // the user's real standing height on top of the rig — leaving desktop eye
+  // height in place floats them ~3.3 m up, above the ward walls ("standing on
+  // a box in black space"). In VR the rig must sit on the floor.
+  renderer.xr.addEventListener('sessionstart', function () {
+    window.__xrPresenting = true;
+    rig.position.y = 0;
+    window.__crumb('xr-session-start');
+  });
+  renderer.xr.addEventListener('sessionend', function () {
+    window.__xrPresenting = false;
+    rig.position.y = ward ? 1.62 : 1.55;   // back to desktop eye height
+    window.__crumb('xr-session-end');
+  });
   document.getElementById('app').appendChild(renderer.domElement);
   // Quest kills WebGL contexts under memory pressure or headset doze. Without
   // preventDefault the context can never be restored; either way three.js
@@ -4299,9 +4312,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       new THREE.LineBasicMaterial({ color: CY, transparent: true, opacity: 0.7 }));
     line.name = 'ray'; ctrl.add(line); scene.add(ctrl);
     const rec = { obj: ctrl, connected: false };
-    ctrl.addEventListener('connected', e => { rec.connected = true; line.visible = !(e.data && e.data.hand); });
+    ctrl.addEventListener('connected', e => { rec.connected = true; rec.hand = (e.data && e.data.handedness) || ''; line.visible = !(e.data && e.data.hand); });
     ctrl.addEventListener('disconnected', () => rec.connected = false);
     ctrl.addEventListener('selectstart', () => xrPick(ctrl));
+    // Grip buttons drive the in-case controls (nothing else uses squeeze):
+    // LEFT grip opens the case menu, RIGHT grip toggles the voice loop.
+    ctrl.addEventListener('squeezestart', () => {
+      if (!ward) return;
+      if (rec.hand === 'left') window.dispatchEvent(new CustomEvent('sim-case-menu'));
+      else window.dispatchEvent(new CustomEvent('sim-voice-toggle'));
+    });
     const hand = renderer.xr.getHand(i);
     hand.addEventListener('pinchstart', () => xrPick(ctrl));
     scene.add(hand);
@@ -4493,7 +4513,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // Wider FOV inside the room — fills the screen with the scene instead of a
     // distant diorama (desktop only; WebXR supplies its own projection).
     camera.fov = 70; camera.updateProjectionMatrix();
-    rig.position.set(0.15, 1.62, 2.45); yaw = 0; pitch = -0.10; applyLook();
+    rig.position.set(0.15, renderer.xr.isPresenting ? 0 : 1.62, 2.45); yaw = 0; pitch = -0.10; applyLook();
 
     // Interaction layer: in-world menus + touchable patient + props.
     try {
@@ -4594,6 +4614,52 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // Soundscape: sim-vitals-show is dispatched synchronously from the Begin
     // click, so start() runs inside the user gesture as Web Audio requires.
     if (window.WardAudio) { try { window.WardAudio.start(); } catch (err) {} }
+  });
+
+  // ---- VR UI bridge: the demo-ui DOM layer mirrors itself into the ------
+  // in-world holographic UI through these events (DOM is invisible in VR).
+  let hudPersist = '', hudTimer = null;
+  window.addEventListener('sim-hud', function (e) {
+    if (!vrui || !e.detail) return;
+    const d = e.detail;
+    if (d.transient) {
+      vrui.setHUDLine(String(d.text || ''));
+      if (hudTimer) clearTimeout(hudTimer);
+      hudTimer = setTimeout(function () { if (vrui) vrui.setHUDLine(hudPersist); }, 4200);
+    } else {
+      hudPersist = String(d.text || '');
+      vrui.setHUDLine(hudPersist);
+    }
+  });
+  window.addEventListener('sim-log', function (e) {
+    if (!vrui || !e.detail || !e.detail.lines) return;
+    vrui.showPanel('dialog', { title: 'CASE LOG', body: e.detail.lines.join('\n') });
+  });
+  window.addEventListener('sim-case-menu', function () {
+    if (!vrui) return;
+    vrui.showPanel('case', {
+      title: 'CASE CONTROLS',
+      body: 'Right grip: voice on / off',
+      buttons: [
+        { label: 'Wait 30 s', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-wait')); } },
+        { label: 'End & debrief', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-end-case')); } },
+        { label: 'Close', onSelect: function () { if (vrui) vrui.hidePanel('case'); } }
+      ]
+    });
+  });
+  window.addEventListener('sim-debrief', function (e) {
+    if (!vrui || !e.detail) return;
+    vrui.showPanel('debrief', {
+      title: e.detail.title || 'CASE COMPLETE',
+      body: e.detail.body || '',
+      buttons: [
+        { label: 'Run again', onSelect: function () {
+            if (vrui) { vrui.hidePanel('debrief'); vrui.hidePanel('case'); vrui.hidePanel('dialog'); }
+            window.dispatchEvent(new CustomEvent('sim-restart'));
+          } },
+        { label: 'Back to hub', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-vitals-hide')); } }
+      ]
+    });
   });
   // Floating action feedback: every bedside action spawns a label + pulse ring
   // at the touched body part, so EVERY menu option lands visibly in the scene.
@@ -6754,6 +6820,28 @@ if (typeof window !== 'undefined') {
   // Bridge to the hub's 3D scene (the hub listens for these).
   function emit(name, detail) { window.dispatchEvent(new CustomEvent(name, { detail: detail })); }
 
+  // ---- VR mirrors: every DOM-only surface also emits an event the hub ----
+  // forwards to the in-world holographic UI (invisible DOM ≠ missing UI).
+  var hudClock = '0:00', hudChip = '';
+  function emitHud() { emit('sim-hud', { text: hudClock + (hudChip ? '  ·  ' + hudChip : '') }); }
+  var vrLog = [];
+  function emitLog(kind, text) {
+    var lab = { you: 'YOU', patient: 'PATIENT', cue: 'OBSERVED', assess: 'NOTE', doctor: 'DR. OKAFOR' }[kind] || '';
+    vrLog.push((lab ? lab + ': ' : '') + String(text || ''));
+    if (vrLog.length > 7) vrLog.shift();
+    emit('sim-log', { lines: vrLog });
+  }
+  window.addEventListener('sim-wait', function () {
+    if (busy || !started) return;
+    PatientLoop.tickTime(30);   // fires onTurn itself
+  });
+  window.addEventListener('sim-end-case', function () { endCase('ended'); });
+  window.addEventListener('sim-restart', function () {
+    if (started) return;
+    vrLog = [];
+    beginCase();
+  });
+
   // =====================================================================
   // 0. LAUNCH — the hub fires 'launch-scenario' when a panel is selected
   // =====================================================================
@@ -7055,13 +7143,15 @@ if (typeof window !== 'undefined') {
       ((kind === 'cue' || kind === 'assess') ? 'font-style:italic;opacity:.9;' : ''), text));
     logBox.appendChild(wrap);
     if (logBox.parentNode) logBox.parentNode.scrollTop = logBox.parentNode.scrollHeight;
+    emitLog(kind, text);
   }
 
   function setChip(txt, color) {
+    hudChip = String(txt || ''); emitHud();
     if (!statusChip) return; statusChip.textContent = txt; statusChip.style.color = color;
     statusChip.style.background = (color === AMBER ? 'rgba(255,176,32,0.15)' : 'rgba(0,229,255,0.15)');
   }
-  function setClock(sec) { if (clockEl) clockEl.textContent = fmt(sec); }
+  function setClock(sec) { hudClock = fmt(sec); emitHud(); if (clockEl) clockEl.textContent = fmt(sec); }
 
   // Manual "End & debrief" — synthesize the loop's onEnd summary from state.
   function endCase(reason) {
@@ -7082,8 +7172,40 @@ if (typeof window !== 'undefined') {
   function finish(summary) {
     if (reported) return;
     reported = true; started = false; busy = false;
+    summary = summary || {};
+    if (window.__xrPresenting) {
+      // In-headset: keep the ward alive (hiding it disposes the in-world UI
+      // with it) and show a holographic summary; the full DOM chart still
+      // renders underneath for reading after the session ends.
+      emit('sim-debrief', vrDebrief(summary));
+      showReport(summary);
+      return;
+    }
     emit('sim-vitals-hide', {});
-    showReport(summary || {});
+    showReport(summary);
+  }
+
+  // Compact debrief for the in-world panel (the full AAR chart stays DOM).
+  function vrDebrief(summary) {
+    var title = { arrest: 'PATIENT ARRESTED', stabilized: 'PATIENT STABILIZED' }[summary.outcome] || 'SCENARIO ENDED';
+    var defEntry = (SCN.interventions || []).filter(function (iv) { return iv.effect && iv.effect.definitive; })[0] || {};
+    var defName = (defEntry.label || 'the definitive treatment').split('(')[0].trim();
+    var rub = SCN.scoringRubric || {}, target = null;
+    for (var rk in rub) { if (/^timeTo.*TargetSeconds$/.test(rk) && typeof rub[rk] === 'number') { target = rub[rk]; break; } }
+    if (target == null) target = 120;
+    var key;
+    if (summary.epinephrineGiven && summary.epinephrineGivenAtSeconds != null) {
+      var at = summary.epinephrineGivenAtSeconds;
+      key = defName + ' at ' + fmt(at) + (at <= target ? ' — within the ' + target + 's target ✓' : ' — later than the ' + target + 's target');
+    } else {
+      key = defName + ' was never given — the definitive treatment was missed';
+    }
+    return {
+      title: title,
+      body: 'Scenario time: ' + fmt(summary.timeElapsedSeconds) + '\n' +
+            'True diagnosis: ' + String(summary.hiddenCondition || SCN.hiddenCondition || '').split('(')[0].trim() + '\n\n' +
+            key + '\n\nFull debrief chart is on the desktop screen.'
+    };
   }
 
   // =====================================================================
@@ -7246,6 +7368,7 @@ if (typeof window !== 'undefined') {
 
   // ---- transient toast ----------------------------------------------------
   function toast(msg) {
+    emit('sim-hud', { text: '⚠ ' + String(msg || ''), transient: true });   // VR mirror
     var r = root();
     var t = glass('position:absolute;left:50%;top:24px;transform:translateX(-50%);padding:12px 20px;' +
       'max-width:80vw;text-align:center;');
@@ -7660,6 +7783,7 @@ if (typeof window !== 'undefined') {
     const SKIN_NAME_RE = /skin|body|face|head|neck|arm|hand|leg|foot|torso|chest/i;
 
     let patientChestBone = null;         // GLTF chest/spine bone (if found)
+    let patientHeadBone = null;          // GLTF head bone (restlessness anim)
     let patientChestBaseScale = null;
     let fallbackChest = null;            // our own bottom-pivoted chest mesh
     const patientWrapper = new THREE.Group();
@@ -7714,6 +7838,11 @@ if (typeof window !== 'undefined') {
         });
       }
       if (patientChestBone) patientChestBaseScale = patientChestBone.scale.clone();
+      // Head bone for the restlessness animation (posed by the bone table; we
+      // only add small oscillations on top of whatever pose it holds).
+      opts.patientGLTF.scene.traverse(function (node) {
+        if (node.isBone && !patientHeadBone && /^head$/i.test(node.name)) patientHeadBone = node;
+      });
     } else {
       // ---- Fallback primitive patient (supine) ----
       patientBaseY = 0;
@@ -7900,13 +8029,26 @@ if (typeof window !== 'undefined') {
       const breath01 = (0.5 + 0.5 * Math.sin(state.breathPhase)) * depth * (1 - state.crit);
 
       if (patientChestBone && patientChestBaseScale) {
-        // Gentle chest puff on the spine/chest bone (~few mm of apparent rise).
-        const s = 1 + 0.028 * breath01;
+        // Chest puff on the spine/chest bone. 0.028 read as lifeless from
+        // headset viewing distance (~1.5 m) — 0.07 is clearly alive without
+        // looking cartoonish, and pairs with a small wrapper bob so the whole
+        // torso visibly rises with each breath.
+        const s = 1 + 0.07 * breath01;
         patientChestBone.scale.set(
           patientChestBaseScale.x * s,
           patientChestBaseScale.y * s,
           patientChestBaseScale.z * s
         );
+        patientWrapper.position.y = patientBaseY + 0.006 * breath01;
+        // Restlessness: an anxious, air-hungry patient isn't statue-still.
+        // Slow head roll + tiny torso shift, scaled by distress (tachycardia)
+        // and gated off as she deteriorates to obtunded/critical.
+        const distress = THREE.MathUtils.clamp((hr - 80) / 60, 0, 1) * (1 - state.crit);
+        const headBone = patientHeadBone;
+        if (headBone) {
+          headBone.rotation.y = 0.10 * distress * Math.sin(state.breathPhase * 0.23);
+          headBone.rotation.z = 0.05 * distress * Math.sin(state.breathPhase * 0.31 + 1.7);
+        }
       } else if (fallbackChest) {
         fallbackChest.scale.y = 1 + 0.9 * 0.09 * breath01;  // ~8mm on the chest cap
       } else {
@@ -11423,7 +11565,7 @@ if (typeof window !== 'undefined') {
     /* ---------------- tunables ---------------- */
     var CYAN        = '#00e5ff';
     var PANEL_W_M   = 1.0;                 // panel width in metres
-    var PANEL_DIST  = 1.2;                 // metres in front of the head
+    var PANEL_DIST  = 1.45;                // metres in front of the head (1.2 felt in-your-face on Quest)
     var CANVAS_W    = 1024, CANVAS_H = 704;
     var PANEL_H_M   = PANEL_W_M * (CANVAS_H / CANVAS_W);
     var HUD_W_M     = 0.66, HUD_H_M = 0.062;
@@ -11690,7 +11832,9 @@ if (typeof window !== 'undefined') {
         rec.def = def;
       }
       drawPanel(rec, -1);
-      placePanel(rec.group);        // recompute placement on every show
+      // Reposition only when newly shown: repainting an already-open panel
+      // (streaming dialogue updates) must not yank it to the current gaze.
+      if (!rec.group.visible || !rec.placed) { placePanel(rec.group); rec.placed = true; }
       rec.group.visible = true;
       return rec;
     }
