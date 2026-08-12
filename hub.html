@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b23');   // build marker: proves which deploy a run used
+  window.__crumb('boot b24');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4492,7 +4492,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   //  start/turn/end. The holographic hub (panels/grid) is the lobby and is
   //  hidden while a scenario's 3D room is mounted, then restored on exit.
   let vitalsMon = null, latestVitals = null;
-  let ward = null, savedView = null, wardProps = null, wardFx = null, wardGrade = null, wardDecor = null, medProps = null;
+  let ward = null, savedView = null, wardProps = null, wardFx = null, wardGrade = null, wardDecor = null, wardDetail = null, medProps = null;
   const wardModels = { patient: null, clinician: null, loading: false, loaded: false };
 
   // Model placement (from asset recon): Fitness Character supine on the bed,
@@ -4623,6 +4623,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (!SAFE_MODE) {
       try { if (window.makeWardProps) wardProps = window.makeWardProps(THREE, scene, { patientArmWorld: { x: 0.05, y: 0.72, z: -1.5 } }); } catch (e) {}
       try { if (window.makeWardDecor) wardDecor = window.makeWardDecor(THREE, scene, {}); } catch (e) {}
+      try { if (window.makeWardDetail) wardDetail = window.makeWardDetail(THREE, scene, {}); } catch (e) {}
       try { if (window.makeMedProps) medProps = window.makeMedProps(THREE, scene, {}); } catch (e) {}
       try { if (window.makeWardFX)    wardFx    = window.makeWardFX(THREE, scene, {}); } catch (e) {}
     }
@@ -4662,6 +4663,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (wardFx)    { try { wardFx.dispose(); }    catch (e) {} wardFx = null; }
     if (wardProps) { try { wardProps.dispose(); } catch (e) {} wardProps = null; }
     if (wardDecor) { try { wardDecor.dispose(); } catch (e) {} wardDecor = null; }
+    if (wardDetail){ try { wardDetail.dispose(); } catch (e) {} wardDetail = null; }
     if (medProps)  { try { medProps.dispose(); }  catch (e) {} medProps = null; }
     if (wardGrade) { try { wardGrade.dispose(); } catch (e) {} wardGrade = null; }
     if (pInteract) { try { pInteract.dispose(); } catch (e) {} pInteract = null; }
@@ -5013,6 +5015,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     updateActionFlashes(dt);
     if (ward && latestVitals) ward.update(latestVitals, dt);
     if (wardFx) wardFx.update(dt, now);
+    if (wardDetail) wardDetail.update(dt, now);   // one position write (flowmeter float)
     if (vitalsMon && latestVitals) vitalsMon.update(latestVitals, now);
     renderer.render(scene, camera);
     if (wardJustWarmed) {
@@ -5037,7 +5040,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 23 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 24 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -8946,6 +8949,7 @@ if (typeof window !== 'undefined') {
   var nextBeatTime = 0;          // next monitor beep
   var nextAlarmTime = 0;         // next alarm-cycle start
   var nextBreathTime = 0;        // next breath-cycle start
+  var nextCorridorTime = 0;      // next far-off corridor alarm chirp
 
   // Persistent nodes (built once per context)
   var nodes = [];                // everything we must disconnect on stop()
@@ -8953,6 +8957,7 @@ if (typeof window !== 'undefined') {
   var wheezeGain = null;         // envelope target for the wheeze whistle
   var flatlineOsc = null;        // continuous flatline tone (gated by gain)
   var flatlineGain = null;
+  var corridorBus = null;        // input node for far-off corridor one-shots
 
   // Levels (deliberately low — this bed plays under UI + speech)
   var MASTER_LEVEL   = 0.25;
@@ -8963,6 +8968,8 @@ if (typeof window !== 'undefined') {
   var BREATH_PEAK    = 0.10;
   var WHEEZE_PEAK    = 0.05;
   var FLATLINE_LEVEL = 0.10;
+  var CORRIDOR_LEVEL = 0.030;    // muffled ward beyond the door — barely there
+  var CORRIDOR_CHIRP = 0.032;    // far-off monitor alarm, heard through a wall
 
   // ---------------------------------------------------------------- utils --
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -9046,6 +9053,38 @@ if (typeof window !== 'undefined') {
     roomLp.connect(roomGain);
     roomGain.connect(master);
 
+    // 2b. DISTANT CORRIDOR: the room should sound like part of a bigger
+    //     hospital, not a sealed box. Pink noise crushed through a ~250Hz
+    //     lowpass and panned to the door side = muffled activity beyond the
+    //     wall. Everything here feeds master, so mute/stop already cover it.
+    var corrLp = keep(ctx.createBiquadFilter());
+    corrLp.type = 'lowpass';
+    corrLp.frequency.value = 250;
+    corrLp.Q.value = 0.6;
+    var corrGain = keep(ctx.createGain());
+    corrGain.gain.value = CORRIDOR_LEVEL;
+    loopNoise(pink).connect(corrLp);
+    corrLp.connect(corrGain);
+    // Pan off to one side when the browser has StereoPanner (Quest 3 does).
+    var corrPan = null;
+    if (typeof ctx.createStereoPanner === 'function') {
+      corrPan = keep(ctx.createStereoPanner());
+      corrPan.pan.value = -0.65;
+      corrGain.connect(corrPan);
+      corrPan.connect(master);
+    } else {
+      corrGain.connect(master);
+    }
+
+    // ...and the bus the occasional far-off alarm chirp is scheduled into:
+    // lowpassed hard so it reads as "through a wall", never as this bed.
+    var chirpLp = keep(ctx.createBiquadFilter());
+    chirpLp.type = 'lowpass';
+    chirpLp.frequency.value = 900;
+    chirpLp.Q.value = 0.5;
+    if (corrPan) chirpLp.connect(corrPan); else chirpLp.connect(master);
+    corridorBus = chirpLp;
+
     // ...plus an even quieter mains hum (~50Hz sine + faint 100Hz harmonic).
     var hum = keep(ctx.createOscillator());
     hum.type = 'sine';
@@ -9113,6 +9152,30 @@ if (typeof window !== 'undefined') {
     osc.onended = function () { try { osc.disconnect(); g.disconnect(); } catch (e) {} };
   }
 
+  // A monitor alarming somewhere else on the ward: a soft two-blip chirp on
+  // the lowpassed + panned corridor bus, so it reads as far away and behind a
+  // wall. Never used for this patient's own state (see schedulerTick).
+  function scheduleCorridorChirp(t) {
+    if (!corridorBus) return;
+    for (var i = 0; i < 2; i++) {
+      var t0 = t + i * 0.30;
+      var osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = 720;
+      var g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(CORRIDOR_CHIRP, t0 + 0.02);   // short attack
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.20);      // short decay
+      osc.connect(g);
+      g.connect(corridorBus);
+      osc.start(t0);
+      osc.stop(t0 + 0.24);
+      osc.onended = (function (o, gg) {
+        return function () { try { o.disconnect(); gg.disconnect(); } catch (e) {} };
+      })(osc, g);
+    }
+  }
+
   // ------------------------------------------------------------ scheduler --
   function schedulerTick() {
     if (!running()) return;
@@ -9169,6 +9232,18 @@ if (typeof window !== 'undefined') {
       wheezeGain.gain.setTargetAtTime(0, ctx.currentTime, 0.4);
       nextBreathTime = 0;
     }
+
+    // 5. DISTANT CORRIDOR ALARM — every 25-60s, randomized. Suppressed while
+    //    critical so it can never be mistaken for this patient's own alarm.
+    if (corridorBus) {
+      if (nextCorridorTime <= 0 || nextCorridorTime < ctx.currentTime - 5) {
+        nextCorridorTime = ctx.currentTime + 18 + Math.random() * 22;   // first one, later
+      }
+      while (nextCorridorTime < horizon) {
+        if (!critical) scheduleCorridorChirp(nextCorridorTime);
+        nextCorridorTime += 25 + Math.random() * 35;
+      }
+    }
   }
 
   // One breath: inhale swell -> exhale fall -> short rest, on both the main
@@ -9214,7 +9289,7 @@ if (typeof window !== 'undefined') {
 
     buildBed();
 
-    nextBeatTime = nextAlarmTime = nextBreathTime = 0;
+    nextBeatTime = nextAlarmTime = nextBreathTime = nextCorridorTime = 0;
     schedTimer = setInterval(schedulerTick, SCHED_INTERVAL_MS);
 
     // resume() inside the user-gesture call chain satisfies autoplay policy.
@@ -9290,7 +9365,8 @@ if (typeof window !== 'undefined') {
     } catch (e) {}
 
     ctx = null; master = null;
-    breathGain = wheezeGain = flatlineOsc = flatlineGain = null;
+    breathGain = wheezeGain = flatlineOsc = flatlineGain = corridorBus = null;
+    nextCorridorTime = 0;
     nodes = [];
 
     setTimeout(function () {
@@ -10272,6 +10348,494 @@ if (typeof window !== 'undefined') {
   };
 })();
 
+</script>
+<script>
+/* ward-detail.js — the last 10% of hospital-room realism for the ward scene.
+ *
+ * Testers said the room still did not read as a REAL hospital room. What was
+ * missing was not more furniture — it was the small, boring, mandatory kit
+ * that exists in every bed bay and that the eye checks for without knowing it.
+ * This module adds ONLY that, and only what ward-scene / ward-props /
+ * ward-decor do not already build:
+ *   1. medical gas panel (O2 / AIR / VACUUM outlets) + flowmeter + O2 coil
+ *   2. suction canister with graduations, two ports and tubing
+ *   3. glove-box dispenser (S/M/L) on the right wall
+ *   4. clinical-waste + general-waste bins by the door
+ *   5. obs chart on a clipboard, pen and kidney dish on the EXISTING over-bed
+ *      table (ward-scene already builds one at x=1.05,z=-0.55 — a second table
+ *      would have been a duplicate, so this dresses the one that is there)
+ *   6. call bell lying at the bed edge, cable draped over the rail to the wall
+ *   7. "BAY 2" sign + "OXYGEN IN USE" placard on the back wall
+ *   8. patient-worn kit: ID wristband, pulse-ox finger probe + cable to the
+ *      monitor, IV cannula patch under the existing IV line's end point
+ *
+ * Scene facts this module is pinned to (do not drift):
+ *   room 5.0 x 5.0 x 2.7; inner faces: back z=-2.50, right x=+2.50, far z=+2.50
+ *   bed centreline x=-0.4, head z=-2.35, mattress top y=0.66, near rail x=+0.105
+ *   headboard top y=0.975 (z -2.395..-2.345); blanket top y=0.79
+ *   ward-scene's own services panel occupies y 1.39..1.71, x -1.2..0.4 on the
+ *     back wall, so the gas rail sits BELOW it at y 1.19..1.37 and the signage
+ *     ABOVE it at y>1.85 — nothing overlaps, nothing is duplicated
+ *   ward-props' IV line terminates at (0.05, 0.72, -1.50) — the cannula patch
+ *     is placed at that point so the line reads as connected
+ *
+ * Quest-3 budget (hard): 33 draw calls, ~1.5 MB of canvas textures (all
+ * <=512 px on the long edge), no lights, no shadows, no per-frame canvas
+ * repaints. update() moves exactly one object (the flowmeter float ball).
+ * Three.js r160, no imports. window.makeWardDetail(THREE, scene, opts)
+ * -> { group, update(dt, now), dispose() } with every resource tracked.
+ */
+(function () {
+  'use strict';
+
+  window.makeWardDetail = function (THREE, scene, opts) {
+    opts = opts || {};
+
+    var BACK_Z  = -2.50;   // inner face of the back wall
+    var RIGHT_X =  2.50;   // inner face of the right wall
+    var FAR_Z   =  2.50;   // inner face of the fourth wall (built by ward-decor)
+
+    var group = new THREE.Group();
+    group.name = 'wardDetail';
+
+    // the only animated node in the module (flowmeter float ball)
+    var floatBall = null, floatBaseY = 0;
+
+    // ---- resource tracking for dispose() --------------------------------
+    var geometries = [], materials = [], textures = [], instanced = [];
+    function geo(g) { geometries.push(g); return g; }
+    function mat(m) { materials.push(m); return m; }
+    function std(p) { return mat(new THREE.MeshStandardMaterial(p)); }
+    function canvasTex(w, h, draw) {
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      draw(c.getContext('2d'), w, h);
+      var t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = 1;
+      textures.push(t);
+      return t;
+    }
+    // NOTE: mesh() only builds — every caller adds to the group explicitly.
+    function mesh(g, m, x, y, z) {
+      var me = new THREE.Mesh(g, m);
+      me.position.set(x || 0, y || 0, z || 0);
+      me.castShadow = false; me.receiveShadow = false;
+      return me;
+    }
+    // Repeated identical parts ride one draw call. place(dummy, i) sets the
+    // transform; colors[i] (optional) tints per instance.
+    function repeat(g, m, count, place, colors) {
+      var im = new THREE.InstancedMesh(g, m, count);
+      var d = new THREE.Object3D();
+      for (var i = 0; i < count; i++) {
+        d.position.set(0, 0, 0); d.rotation.set(0, 0, 0); d.scale.set(1, 1, 1);
+        place(d, i);
+        d.updateMatrix();
+        im.setMatrixAt(i, d.matrix);
+        if (colors && colors[i]) im.setColorAt(i, colors[i]);
+      }
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      im.frustumCulled = false;      // tiny fixtures; skip per-instance bounds
+      im.castShadow = false; im.receiveShadow = false;
+      instanced.push(im);
+      group.add(im);
+      return im;
+    }
+    function tubeAlong(points, radius, m, seg) {
+      var curve = new THREE.CatmullRomCurve3(points);
+      var t = new THREE.Mesh(
+        geo(new THREE.TubeGeometry(curve, seg || Math.max(10, points.length * 3), radius, 5, false)), m);
+      t.castShadow = false; t.receiveShadow = false;
+      group.add(t);
+      return t;
+    }
+    function V(x, y, z) { return new THREE.Vector3(x, y, z); }
+
+    // ---- shared muted-clinical palette ----------------------------------
+    var steelMat  = std({ color: 0x9aa1a8, roughness: 0.38, metalness: 0.62 });
+    var chromeMat = std({ color: 0xc6cbd0, roughness: 0.22, metalness: 0.85 });
+    var darkMat   = std({ color: 0x3a3d40, roughness: 0.62, metalness: 0.18 });
+    var whiteMat  = std({ color: 0xeef0ef, roughness: 0.55, metalness: 0.04 });
+
+    // =====================================================================
+    // 1) MEDICAL GAS PANEL — back wall behind the bed head, BELOW ward-scene's
+    //    indicator panel (which starts at y=1.39). Rail spans x -0.85..0.05.
+    // =====================================================================
+    var GAS_X = -0.4, GAS_Y = 1.28, RAIL_Z = BACK_Z + 0.019;   // -2.481
+    // outlet x offsets from the rail centre, mirrored by the label canvas
+    var OUT_DX = [-0.32, -0.07, 0.18];
+
+    (function gasPanel() {
+      // brushed stainless backplate
+      group.add(mesh(geo(new THREE.BoxGeometry(0.90, 0.18, 0.038)), steelMat, GAS_X, GAS_Y, RAIL_Z));
+
+      // printed face: outlet bezels + colour-coded service labels
+      var faceTex = canvasTex(512, 128, function (g, w, h) {
+        var brush = g.createLinearGradient(0, 0, 0, h);
+        brush.addColorStop(0, '#c9ced3');
+        brush.addColorStop(0.45, '#aeb5bb');
+        brush.addColorStop(1, '#c2c7cc');
+        g.fillStyle = brush; g.fillRect(0, 0, w, h);
+        for (var s = 0; s < w; s += 3) {           // faint brushed streaks
+          g.fillStyle = 'rgba(255,255,255,' + (0.02 + (s % 7) * 0.006) + ')';
+          g.fillRect(s, 0, 1, h);
+        }
+        g.strokeStyle = 'rgba(60,66,72,0.45)'; g.lineWidth = 2;
+        g.strokeRect(3, 3, w - 6, h - 6);
+        var svc = [
+          { u: 0.128, name: 'OXYGEN', bg: '#ffffff', fg: '#1b2733' },
+          { u: 0.419, name: 'AIR',    bg: '#23282d', fg: '#ffffff' },
+          { u: 0.709, name: 'VACUUM', bg: '#e8c317', fg: '#1b2733' }
+        ];
+        g.textAlign = 'center';
+        svc.forEach(function (o) {
+          var cx = o.u * w;
+          // recessed bezel ring behind the real cylinder
+          g.fillStyle = 'rgba(45,50,55,0.55)';
+          g.beginPath(); g.arc(cx, 46, 27, 0, Math.PI * 2); g.fill();
+          g.fillStyle = 'rgba(150,157,164,0.9)';
+          g.beginPath(); g.arc(cx, 46, 21, 0, Math.PI * 2); g.fill();
+          // colour-coded label plate
+          g.fillStyle = o.bg;
+          g.fillRect(cx - 52, 88, 104, 26);
+          g.strokeStyle = 'rgba(40,45,50,0.6)'; g.lineWidth = 1.5;
+          g.strokeRect(cx - 52, 88, 104, 26);
+          g.fillStyle = o.fg;
+          g.font = 'bold 17px system-ui, sans-serif';
+          g.fillText(o.name, cx, 107);
+        });
+      });
+      var face = mesh(geo(new THREE.PlaneGeometry(0.86, 0.16)),
+        std({ map: faceTex, roughness: 0.5, metalness: 0.25 }),
+        GAS_X, GAS_Y, RAIL_Z + 0.0205);
+      group.add(face);
+
+      // three physical outlet bodies (one draw call)
+      var outGeo = geo(new THREE.CylinderGeometry(0.021, 0.024, 0.05, 10));
+      repeat(outGeo, chromeMat, 3, function (d, i) {
+        d.position.set(GAS_X + OUT_DX[i], GAS_Y + 0.028, RAIL_Z + 0.045);
+        d.rotation.x = Math.PI / 2;                 // axis out of the wall
+      });
+
+      // ---- flowmeter screwed onto the OXYGEN outlet -----------------------
+      var FMX = GAS_X + OUT_DX[0];
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.026, 0.03, 0.16, 10)), chromeMat,
+        FMX, GAS_Y - 0.10, RAIL_Z + 0.044));
+      var tubeMat = mat(new THREE.MeshStandardMaterial({
+        color: 0xdfeef2, roughness: 0.18, metalness: 0.0, transparent: true, opacity: 0.42
+      }));
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.0145, 0.0145, 0.125, 10)), tubeMat,
+        FMX, GAS_Y - 0.085, RAIL_Z + 0.072));
+      floatBall = mesh(geo(new THREE.SphereGeometry(0.0095, 10, 8)),
+        std({ color: 0x2fa85c, roughness: 0.35, metalness: 0.1, emissive: 0x13401f, emissiveIntensity: 0.4 }),
+        FMX, GAS_Y - 0.125, RAIL_Z + 0.072);
+      floatBaseY = floatBall.position.y;
+      group.add(floatBall);
+
+      // ---- coiled green O2 tubing hanging off the flowmeter ---------------
+      var coil = [];
+      for (var i = 0; i <= 20; i++) {
+        var t = i / 20, a = t * Math.PI * 4.4;
+        coil.push(V(FMX + Math.sin(a) * 0.045,
+                    GAS_Y - 0.185 - t * 0.10,
+                    RAIL_Z + 0.03 + Math.cos(a) * 0.02));
+      }
+      tubeAlong(coil, 0.0055, std({ color: 0x2c7a4b, roughness: 0.55, metalness: 0.0 }), 60);
+    })();
+
+    // =====================================================================
+    // 2) SUCTION CANISTER — wall-mounted right of the gas rail, under the
+    //    (existing) indicator panel. Body 0.12 dia x 0.22 h.
+    // =====================================================================
+    (function suction() {
+      var SX = 0.30, SY = 1.20, SZ = BACK_Z + 0.085;
+      var gradTex = canvasTex(128, 256, function (g, w, h) {
+        g.fillStyle = '#dfe9ec'; g.fillRect(0, 0, w, h);
+        g.strokeStyle = 'rgba(50,70,80,0.55)';
+        g.fillStyle = 'rgba(50,70,80,0.7)';
+        g.font = '11px system-ui, sans-serif';
+        for (var i = 1; i <= 9; i++) {              // graduations, long every 3rd
+          var y = h - (i / 10) * h;
+          var long = (i % 3 === 0);
+          g.lineWidth = long ? 2 : 1;
+          g.beginPath();
+          g.moveTo(w * 0.30, y); g.lineTo(w * (long ? 0.56 : 0.46), y); g.stroke();
+          if (long) g.fillText((i * 100) + '', w * 0.60, y + 4);
+        }
+      });
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.06, 0.058, 0.22, 16)),
+        mat(new THREE.MeshStandardMaterial({
+          map: gradTex, color: 0xffffff, roughness: 0.25, metalness: 0.0,
+          transparent: true, opacity: 0.55
+        })), SX, SY, SZ));
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.064, 0.064, 0.03, 16)), whiteMat,
+        SX, SY + 0.125, SZ));
+      // two lid ports (one draw call)
+      var portGeo = geo(new THREE.CylinderGeometry(0.009, 0.009, 0.036, 8));
+      repeat(portGeo, darkMat, 2, function (d, i) {
+        d.position.set(SX + (i ? 0.026 : -0.026), SY + 0.156, SZ + (i ? 0.018 : -0.014));
+      });
+      // clear tubing off the near port, sagging toward the bed head
+      tubeAlong([
+        V(SX - 0.026, SY + 0.172, SZ - 0.014),
+        V(SX - 0.09,  SY + 0.10,  SZ + 0.01),
+        V(SX - 0.15,  SY - 0.02,  SZ - 0.01),
+        V(SX - 0.13,  SY - 0.14,  SZ - 0.03)
+      ], 0.0055, mat(new THREE.MeshStandardMaterial({
+        color: 0xe6eef0, roughness: 0.3, metalness: 0.0, transparent: true, opacity: 0.7
+      })), 22);
+    })();
+
+    // =====================================================================
+    // 3) GLOVE-BOX DISPENSER — right wall (x=+2.50, faces -x), clear of the
+    //    crash cart (z=-0.9) and the visitor chair (z=+1.85).
+    // =====================================================================
+    (function gloves() {
+      var GX = RIGHT_X - 0.012, GZ = 0.55, GYS = [1.66, 1.52, 1.38];
+      group.add(mesh(geo(new THREE.BoxGeometry(0.022, 0.50, 0.28)), steelMat, GX, 1.52, GZ));
+
+      var boxGeo = geo(new THREE.BoxGeometry(0.10, 0.125, 0.22));
+      repeat(boxGeo, std({ color: 0xffffff, roughness: 0.7, metalness: 0.02 }), 3,
+        function (d, i) { d.position.set(GX - 0.062, GYS[i], GZ); },
+        [new THREE.Color(0x3f7fc4), new THREE.Color(0x4fa07a), new THREE.Color(0xc4693f)]);
+
+      // dark open front on each box + a glove tongue poking out of it
+      var mouthGeo = geo(new THREE.BoxGeometry(0.006, 0.055, 0.14));
+      repeat(mouthGeo, darkMat, 3, function (d, i) {
+        d.position.set(GX - 0.114, GYS[i] + 0.018, GZ);
+      });
+      var tongueGeo = geo(new THREE.BoxGeometry(0.014, 0.05, 0.055));
+      repeat(tongueGeo, std({ color: 0xd8e6ec, roughness: 0.85, metalness: 0.0 }), 3,
+        function (d, i) {
+          d.position.set(GX - 0.118, GYS[i] + 0.042, GZ + (i - 1) * 0.03);
+          d.rotation.set(0, 0.3 * (i - 1), 0.35 + 0.12 * i);
+        });
+
+      var labTex = canvasTex(256, 64, function (g, w, h) {
+        g.fillStyle = '#f4f6f5'; g.fillRect(0, 0, w, h);
+        g.strokeStyle = 'rgba(60,70,80,0.5)'; g.lineWidth = 2; g.strokeRect(2, 2, w - 4, h - 4);
+        g.fillStyle = '#25445e';
+        g.font = 'bold 20px system-ui, sans-serif'; g.textAlign = 'center';
+        g.fillText('EXAM GLOVES', w / 2, 26);
+        g.font = 'bold 15px system-ui, sans-serif';
+        g.fillStyle = '#4a5560';
+        g.fillText('SMALL  ·  MEDIUM  ·  LARGE', w / 2, 48);
+      });
+      var lab = mesh(geo(new THREE.PlaneGeometry(0.24, 0.06)),
+        std({ map: labTex, roughness: 0.7, metalness: 0.02 }), GX - 0.013, 1.29, GZ);
+      lab.rotation.y = -Math.PI / 2;              // face into the room
+      group.add(lab);
+    })();
+
+    // =====================================================================
+    // 4) WASTE BINS — far wall, LEFT of the door (door spans x 0.79..1.91),
+    //    under the sanitizer, well clear of the visitor chair at (1.9, 1.85).
+    // =====================================================================
+    (function bins() {
+      var YX = 0.34, YZ = FAR_Z - 0.26;
+      var BX = 0.02, BZ = FAR_Z - 0.22;
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.135, 0.122, 0.50, 16)),
+        std({ color: 0xe3b91b, roughness: 0.6, metalness: 0.03 }), YX, 0.25, YZ));
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.142, 0.138, 0.045, 16)),
+        std({ color: 0xc59d0f, roughness: 0.55, metalness: 0.03 }), YX, 0.522, YZ));
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.10, 0.09, 0.38, 14)),
+        std({ color: 0x2f3235, roughness: 0.7, metalness: 0.05 }), BX, 0.19, BZ));
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.104, 0.10, 0.035, 14)),
+        darkMat, BX, 0.397, BZ));
+      // foot pedal bars (one draw call)
+      var pedGeo = geo(new THREE.BoxGeometry(0.13, 0.014, 0.05));
+      repeat(pedGeo, steelMat, 2, function (d, i) {
+        if (i === 0) d.position.set(YX, 0.032, YZ - 0.15);
+        else         d.position.set(BX, 0.028, BZ - 0.115);
+      });
+    })();
+
+    // =====================================================================
+    // 5) OVER-BED TABLE DRESSING — ward-scene already builds the cantilever
+    //    table (top centre 1.05, 0.835, -0.55; cup at 1.15,-0.50). A second
+    //    table would duplicate it, so the obs chart, pen and kidney dish go
+    //    on the one that exists.
+    // =====================================================================
+    (function trayItems() {
+      var TOP = 0.840, CX = 0.95, CZ = -0.57;   // table surface is y=0.835
+      var chartTex = canvasTex(256, 384, function (g, w, h) {
+        g.fillStyle = '#fbfaf4'; g.fillRect(0, 0, w, h);
+        g.fillStyle = '#2b4a6f'; g.fillRect(0, 0, w, 34);
+        g.fillStyle = '#fbfaf4';
+        g.font = 'bold 15px system-ui, sans-serif'; g.textAlign = 'center';
+        g.fillText('OBSERVATION CHART', w / 2, 22);
+        // ruled rows + faint column rules
+        g.strokeStyle = 'rgba(90,105,125,0.30)'; g.lineWidth = 1;
+        for (var r = 0; r < 14; r++) {
+          var y = 52 + r * 15;
+          g.beginPath(); g.moveTo(10, y); g.lineTo(w - 10, y); g.stroke();
+        }
+        g.strokeStyle = 'rgba(90,105,125,0.22)';
+        [0.30, 0.52, 0.74].forEach(function (u) {
+          g.beginPath(); g.moveTo(w * u, 40); g.lineTo(w * u, 262); g.stroke();
+        });
+        // faint pen ticks in the first column
+        g.fillStyle = 'rgba(40,55,80,0.45)';
+        for (var k = 0; k < 9; k++) g.fillRect(16, 58 + k * 15, 34 + (k % 3) * 9, 3);
+        // heart-rate squiggle across the lower trace box
+        g.strokeStyle = 'rgba(160,45,45,0.62)'; g.lineWidth = 2;
+        g.strokeRect(12, 272, w - 24, 96);
+        g.beginPath();
+        for (var x = 14; x < w - 14; x++) {
+          var p = (x % 34) / 34, yy = 330;
+          if (p > 0.30 && p < 0.36) yy = 330 - (p - 0.30) * 900;
+          else if (p >= 0.36 && p < 0.44) yy = 330 - (0.44 - p) * 560;
+          else if (p > 0.55 && p < 0.72) yy = 330 + Math.sin((p - 0.55) * 18) * 9;
+          if (x === 14) g.moveTo(x, yy); else g.lineTo(x, yy);
+        }
+        g.stroke();
+      });
+      var board = mesh(geo(new THREE.BoxGeometry(0.21, 0.007, 0.29)),
+        std({ map: chartTex, roughness: 0.8, metalness: 0.0 }), CX, TOP, CZ);
+      board.rotation.y = 0.22;
+      group.add(board);
+      var clip = mesh(geo(new THREE.BoxGeometry(0.07, 0.012, 0.025)), chromeMat,
+        CX + 0.031, TOP + 0.008, CZ - 0.13);
+      clip.rotation.y = 0.22;
+      group.add(clip);
+      var pen = mesh(geo(new THREE.CylinderGeometry(0.005, 0.005, 0.13, 8)),
+        std({ color: 0x1d3a63, roughness: 0.4, metalness: 0.1 }), CX + 0.01, TOP + 0.008, CZ + 0.02);
+      pen.rotation.set(0, 0, Math.PI / 2);
+      pen.rotation.y = 0.9;
+      group.add(pen);
+      var dish = mesh(geo(new THREE.CylinderGeometry(0.062, 0.05, 0.032, 16)),
+        std({ color: 0xd7dce0, roughness: 0.3, metalness: 0.55 }), 1.235, TOP + 0.011, -0.665);
+      dish.scale.z = 0.62;
+      group.add(dish);
+    })();
+
+    // =====================================================================
+    // 6) CALL BELL — lying at the near bed edge against the rail, cable
+    //    draped OVER the top rail bar (y 0.905..0.935) back to the wall.
+    // =====================================================================
+    (function callBell() {
+      var HX = 0.05, HY = 0.807, HZ = -1.40;
+      var body = mesh(geo(new THREE.BoxGeometry(0.05, 0.026, 0.12)),
+        std({ color: 0xe9ebe8, roughness: 0.55, metalness: 0.04 }), HX, HY, HZ);
+      body.rotation.y = -0.22;
+      group.add(body);
+      var btn = mesh(geo(new THREE.CylinderGeometry(0.013, 0.013, 0.008, 12)),
+        std({ color: 0xc0392b, roughness: 0.45, metalness: 0.05, emissive: 0x3a0d08, emissiveIntensity: 0.5 }),
+        HX + 0.004, HY + 0.016, HZ - 0.026);
+      group.add(btn);
+      tubeAlong([
+        V(HX, HY - 0.004, HZ + 0.058),
+        V(HX + 0.065, 0.99, HZ - 0.15),
+        V(HX + 0.05,  1.02, -1.95),
+        V(HX + 0.01,  1.05, -2.30),
+        V(HX - 0.03,  1.12, -2.44)
+      ], 0.0045, std({ color: 0xdfe2e0, roughness: 0.6, metalness: 0.02 }), 30);
+    })();
+
+    // =====================================================================
+    // 7) BAY SIGNAGE — back wall ABOVE ward-scene's panel (top y=1.71) and
+    //    clear of ward-decor's posters (x=-1.85 and x=+1.55).
+    // =====================================================================
+    (function signage() {
+      var bayTex = canvasTex(256, 128, function (g, w, h) {
+        g.fillStyle = '#25445e'; g.fillRect(0, 0, w, h);
+        g.fillStyle = '#f4f7f8'; g.fillRect(5, 5, w - 10, h - 10);
+        g.fillStyle = '#25445e';
+        g.font = 'bold 58px system-ui, sans-serif'; g.textAlign = 'center';
+        g.fillText('BAY 2', w / 2, 74);
+        g.font = 'bold 15px system-ui, sans-serif';
+        g.fillStyle = '#5c6a76';
+        g.fillText('ACUTE ASSESSMENT', w / 2, 104);
+      });
+      group.add(mesh(geo(new THREE.PlaneGeometry(0.34, 0.17)),
+        std({ map: bayTex, roughness: 0.75, metalness: 0.02 }), -0.78, 1.95, BACK_Z + 0.011));
+
+      var warnTex = canvasTex(256, 128, function (g, w, h) {
+        g.fillStyle = '#ffffff'; g.fillRect(0, 0, w, h);
+        g.strokeStyle = '#b3202a'; g.lineWidth = 8; g.strokeRect(4, 4, w - 8, h - 8);
+        g.fillStyle = '#b3202a';
+        g.font = 'bold 22px system-ui, sans-serif'; g.textAlign = 'center';
+        g.fillText('OXYGEN IN USE', w / 2, 44);
+        g.font = 'bold 26px system-ui, sans-serif';
+        g.fillStyle = '#1b2733';
+        g.fillText('NO SMOKING', w / 2, 84);
+        // struck-through cigarette pictogram
+        g.strokeStyle = '#b3202a'; g.lineWidth = 4;
+        g.beginPath(); g.arc(w / 2, 104, 15, 0, Math.PI * 2); g.stroke();
+        g.beginPath(); g.moveTo(w / 2 - 11, 114); g.lineTo(w / 2 + 11, 94); g.stroke();
+      });
+      group.add(mesh(geo(new THREE.PlaneGeometry(0.30, 0.15)),
+        std({ map: warnTex, roughness: 0.75, metalness: 0.02 }), -0.10, 1.94, BACK_Z + 0.011));
+    })();
+
+    // =====================================================================
+    // 8) PATIENT-WORN KIT — the detail that actually sells "this is a
+    //    patient". Coordinates come from the posed supine model: near wrist
+    //    (-0.12, 0.80, -1.35), index finger (-0.10, 0.79, -1.28), far
+    //    forearm (0.05, 0.79, -1.52) where ward-props' IV line ends.
+    // =====================================================================
+    (function patientKit() {
+      // ID wristband — ring axis along z, i.e. around the arm
+      var band = mesh(geo(new THREE.TorusGeometry(0.028, 0.0055, 8, 18)),
+        std({ color: 0xf6f7f4, roughness: 0.65, metalness: 0.0 }), -0.12, 0.80, -1.35);
+      band.rotation.y = 0.1;
+      group.add(band);
+
+      // pulse-ox finger probe + its sensor window + cable to the monitor
+      var clip = mesh(geo(new THREE.BoxGeometry(0.024, 0.021, 0.038)),
+        std({ color: 0x6e757c, roughness: 0.5, metalness: 0.2 }), -0.10, 0.792, -1.28);
+      clip.rotation.y = -0.12;
+      group.add(clip);
+      group.add(mesh(geo(new THREE.BoxGeometry(0.015, 0.004, 0.02)),
+        mat(new THREE.MeshStandardMaterial({
+          color: 0x8c1c14, roughness: 0.5, metalness: 0.0,
+          emissive: 0xd83022, emissiveIntensity: 0.85
+        })), -0.10, 0.7805, -1.272));
+      tubeAlong([
+        V(-0.10, 0.789, -1.262),
+        V(0.02,  0.82,  -1.235),
+        V(0.11,  0.985, -1.245),
+        V(0.35,  1.10,  -1.325),
+        V(0.60,  1.28,  -1.44)
+      ], 0.0035, std({ color: 0x33383c, roughness: 0.65, metalness: 0.05 }), 34);
+
+      // IV cannula patch, sitting under the end of ward-props' IV line
+      var patch = mesh(geo(new THREE.BoxGeometry(0.058, 0.005, 0.04)),
+        mat(new THREE.MeshStandardMaterial({
+          color: 0xe8dcc8, roughness: 0.45, metalness: 0.0, transparent: true, opacity: 0.82
+        })), 0.055, 0.7945, -1.52);
+      patch.rotation.y = -0.18;
+      group.add(patch);
+    })();
+
+    // ---------------------------------------------------------------------
+    scene.add(group);
+
+    // Only moving part in the module: the flowmeter float, drifting inside
+    // its tube. One position write per frame — no canvas work, no allocation.
+    function update(dt, now) {
+      if (!floatBall) return;
+      var t = (typeof now === 'number' ? now : 0);
+      floatBall.position.y = floatBaseY + 0.008 + Math.sin(t * 1.35) * 0.0035
+                                                + Math.sin(t * 3.7) * 0.0012;
+    }
+
+    function dispose() {
+      if (group.parent) group.parent.remove(group);
+      instanced.forEach(function (im) { try { im.dispose(); } catch (e) {} });
+      var seen = new Set();
+      geometries.concat(materials).concat(textures).forEach(function (r) {
+        if (r && !seen.has(r)) { seen.add(r); try { r.dispose(); } catch (e) {} }
+      });
+      geometries.length = 0; materials.length = 0; textures.length = 0; instanced.length = 0;
+      floatBall = null;
+    }
+
+    return { group: group, update: update, dispose: dispose };
+  };
+})();
 </script>
 <script>
 /* ward-grade.js — visual "grade" pass for an already-built, already-lit hospital room.
