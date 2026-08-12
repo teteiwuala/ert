@@ -3924,6 +3924,28 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     document.body.appendChild(d);
   });
 
+  // ---- crash black-box ----------------------------------------------------
+  // The Quest gives no console; when the OS kills the browser the page dies
+  // with it. So journal each launch stage into localStorage (survives the
+  // crash) and report the previous run's last stage on the next boot. A
+  // 'clean-exit' crumb on pagehide separates crashes from normal leaves.
+  window.__crumb = function (s) {
+    try {
+      var a = JSON.parse(localStorage.getItem('quest-crumbs') || '[]');
+      a.push(s);
+      localStorage.setItem('quest-crumbs', JSON.stringify(a.slice(-30)));
+    } catch (e) {}
+  };
+  window.addEventListener('pagehide', function () { window.__crumb('clean-exit'); });
+  window.__lastRunCrumbs = (function () {
+    try {
+      var a = JSON.parse(localStorage.getItem('quest-crumbs') || '[]');
+      localStorage.removeItem('quest-crumbs');
+      return a;
+    } catch (e) { return []; }
+  })();
+  window.__crumb('boot');
+
   const CY = 0x00e5ff, CYs = '#00e5ff', AMBER = '#ffb020';
 
   // ---- renderer / scene / camera -----------------------------------------
@@ -3949,6 +3971,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
+  renderer.xr.addEventListener('sessionstart', function () { window.__crumb('xr-session-start'); });
   document.getElementById('app').appendChild(renderer.domElement);
   // Quest kills WebGL contexts under memory pressure or headset doze. Without
   // preventDefault the context can never be restored; either way three.js
@@ -4389,6 +4412,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   // compile them all synchronously in one frame — a multi-second GPU stall
   // that the Quest OS answers by killing the browser ("browser has stopped").
   let wardWarming = false;
+  let wardJustWarmed = false; // one-shot: crumb the first real ward frame surviving
   let warmScene = null;      // tiny black scene rendered during warm-up so XR frames keep flowing
   // ?safe=1 — headset bisect mode: mount ONLY the bare ward room (no models,
   // no monitor, no interaction layer, no audio). If the bare room survives a
@@ -4398,6 +4422,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   })();
   function mountWard(scn) {
     if (ward || typeof window.makeWardScene !== 'function') return;
+    window.__crumb('mount-begin' + (SAFE_MODE ? '(safe)' : ''));
     // Hide every current hub object except the camera rig; remember visibility.
     savedView = {
       hidden: [], fog: scene.fog,
@@ -4417,6 +4442,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       patientTransform: WARD_PATIENT_T, clinicianTransform: WARD_CLINICIAN_T,
       clinicianIdleClip: WARD_IDLE_CLIP
     });
+    window.__crumb('ward-built');
     // Additive enhancements — extra props/FX cost VRAM, so skip them on low-GPU devices.
     if (!window.__LOW_GPU) {
       try { if (window.applyWardGrade) wardGrade = window.applyWardGrade(THREE, renderer, scene, {}); } catch (e) {}
@@ -4451,6 +4477,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         pInteract.buildZones();
       }
     } catch (err) { /* interaction layer optional */ }
+    window.__crumb('interact-built');
   }
   function unmountWard() {
     wardWarming = false;
@@ -4492,6 +4519,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   // only runs if its own teardown is still the pending one.
   let pendingTeardown = null;
   window.addEventListener('sim-vitals-show', function (e) {
+    window.__crumb('vitals-show');
     if (pendingTeardown) { try { pendingTeardown(); } catch (err) {} pendingTeardown = null; }
     const nr = (e.detail && e.detail.normalRanges) || null;
     latestVitals = null;
@@ -4508,10 +4536,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // sync compile fallback still beats compiling mid-XR-frame). The loop
     // idles on wardWarming meanwhile — a moment of black, never a stall.
     wardWarming = true;
+    window.__crumb('warm-start');
     let warmed = false;
     const finishWarm = function () {
       if (warmed) return; warmed = true;
       wardWarming = false;
+      wardJustWarmed = true;
+      window.__crumb('warm-done');
       if (cine && ward) cine.enterWard(cineRefs, { from: CINE_FROM, to: CINE_TO, durationMs: 2600 });
     };
     try {
@@ -4700,6 +4731,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (wardFx) wardFx.update(dt, now);
     if (vitalsMon && latestVitals) vitalsMon.update(latestVitals, now);
     renderer.render(scene, camera);
+    if (wardJustWarmed) { wardJustWarmed = false; window.__crumb('first-ward-frame-ok'); }
     } catch (loopErr) {
       // One bad frame must not stop the animation loop: three.js schedules
       // the next frame AFTER the callback returns, so an uncaught throw here
@@ -4708,7 +4740,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (!loopErrWarned) { loopErrWarned = true; console.warn('[loop] frame error (loop kept alive):', loopErr); }
     }
   });
-  setStatus('Hub ready — click a module (or press Enter VR in a headset).');
+  (function reportLastRun() {
+    var a = window.__lastRunCrumbs || [];
+    if (a.length && a[a.length - 1] !== 'clean-exit') {
+      setStatus('⚠ LAST RUN CRASHED after: [' + a.slice(-4).join(' → ') + '] — tell Claude this. Hub ready.');
+      console.warn('[black-box] previous run crumbs:', a);
+      return;
+    }
+    setStatus('Hub ready — click a module (or press Enter VR in a headset).');
+  })();
 })();
 
 </script>
@@ -6682,6 +6722,7 @@ if (typeof window !== 'undefined') {
   // =====================================================================
   window.addEventListener('launch-scenario', function (e) {
     var panel = e.detail || {};
+    try { if (window.__crumb) window.__crumb('module-tap:' + (panel.id || '?')); } catch (err) {}
     if (panel.id !== 'emerg') {
       toast('“' + String(panel.title || 'This module').replace('\n', ' ') +
         '” is coming soon — the Emergency Response case is the live build.');
