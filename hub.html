@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b17');   // build marker: proves which deploy a run used
+  window.__crumb('boot b18');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4344,8 +4344,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     glove.visible = false;
     grip.add(glove); rig.add(grip);
     rec.glove = glove;
+    // Index fingertip marker — the point that presses panels. Invisible; its
+    // world position is all we need.
+    const fingertip = new THREE.Object3D();
+    fingertip.position.set(-0.009, -0.055, -0.105);
+    glove.add(fingertip);
+    rec.fingertip = fingertip;
+    rec.line = line;
     ctrl.addEventListener('connected', e => {
       const isHand = !!(e.data && e.data.hand);
+      rec.isHandInput = isHand;
       glove.visible = !isHand;
       // Mirror for the left hand: the glove is modelled right-handed.
       glove.scale.x = ((e.data && e.data.handedness) === 'left') ? -1 : 1;
@@ -4772,6 +4780,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       title: e.detail.title || 'CASE COMPLETE',
       body: e.detail.body || '',
       buttons: [
+        // Button press = the user gesture getUserMedia needs, so the debrief
+        // conversation can open its mic legally.
+        { label: 'Talk to debrief nurse', onSelect: function () {
+            window.dispatchEvent(new CustomEvent('sim-debrief-voice'));
+          } },
         { label: 'Run again', onSelect: function () {
             if (vrui) { vrui.hidePanel('debrief'); vrui.hidePanel('case'); vrui.hidePanel('dialog'); }
             window.dispatchEvent(new CustomEvent('sim-restart'));
@@ -4897,6 +4910,38 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
   });
 
+  // ---- direct touch: press in-world panels with the gloved fingertip ------
+  // The pointer ray is a lobby affordance (module panels sit metres away). In
+  // the ward everything is within arm's reach, so the ray is hidden there and
+  // buttons are pressed by putting a finger through them. Edge-triggered: one
+  // press per entry, with a small exit hysteresis so a resting hand doesn't
+  // machine-gun the button.
+  const tipWorld = new THREE.Vector3();
+  let touchLatched = [false, false];
+  function updateTouch() {
+    let hover = null;
+    for (let i = 0; i < inputs.length; i++) {
+      const rec = inputs[i];
+      // Ray is for the lobby only; in the ward you use your hands.
+      if (rec.line) rec.line.visible = !ward && !rec.isHandInput;
+      if (!rec.connected || !rec.fingertip || !rec.glove || !rec.glove.visible) { touchLatched[i] = false; continue; }
+      rec.fingertip.getWorldPosition(tipWorld);
+      const hit = vrui.touchAt(tipWorld);
+      if (hit && hit.button) {
+        hover = hit;
+        if (!touchLatched[i]) {
+          touchLatched[i] = true;
+          vrui.pressButton(hit);
+          window.__crumb('touch-press');
+        }
+      } else {
+        touchLatched[i] = false;
+        if (hit && !hover) hover = hit;
+      }
+    }
+    vrui.hoverButton(hover);
+  }
+
   // ---- main loop ----------------------------------------------------------
   let flatLast = 0, t0 = performance.now(), lastNow = 0;
   let loopErrWarned = false;
@@ -4953,6 +4998,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (pInteract) pInteract.update(dt);
     if (vrui) vrui.update(dt);
     if (handViz && presenting) handViz.update();
+    if (presenting && vrui) updateTouch();
     if (heartViz) heartViz.update(dt, now);
     updateActionFlashes(dt);
     if (ward && latestVitals) ward.update(latestVitals, dt);
@@ -4981,7 +5027,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 17 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 18 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7193,9 +7239,10 @@ if (typeof window !== 'undefined') {
             }
             // The live voice is the PATIENT in both scenarios (Dr. Okafor only
             // via ?agent=doctor) — label the log line accordingly.
-            var isDoc = false;
-            try { isDoc = /[?&]agent=doctor\b/.test(location.search); } catch (e2) {}
-            appendLog(isDoc ? 'doctor' : 'patient', text);
+            var who2 = 'patient';
+            if (window.__scenarioVoiceAgentId === DEBRIEF_AGENT_ID) who2 = 'debrief';
+            else { try { if (/[?&]agent=doctor\b/.test(location.search)) who2 = 'doctor'; } catch (e2) {} }
+            appendLog(who2, text);
           }
         });
       } catch (err) {}
@@ -7334,7 +7381,7 @@ if (typeof window !== 'undefined') {
     var tag = {
       you: ['YOU', CY], patient: ['PATIENT', '#fff'],
       cue: ['OBSERVED', AMBER], assess: ['CLINICAL NOTE', GREEN],
-      doctor: ['DR. OKAFOR', '#d9b3ff']
+      doctor: ['DR. OKAFOR', '#d9b3ff'], debrief: ['DEBRIEF NURSE', '#9fe8c8']
     }[kind] || ['', '#fff'];
     wrap.appendChild(el('div', 'font:700 10px sans-serif;letter-spacing:1px;color:' + tag[1] + ';margin-bottom:2px;', tag[0]));
     var body = (kind === 'patient') ? '#eafcff' : '#cfe9f5';
@@ -7399,6 +7446,18 @@ if (typeof window !== 'undefined') {
     } else {
       key = defName + ' was never given — the definitive treatment was missed';
     }
+    // Facts handed to the debrief nurse agent as a contextual update. It is
+    // prompted to treat these as the ONLY truth, so everything it can say
+    // about the run has to be in here.
+    var acts = (summary.transcript || []).filter(function (m) { return m.role === 'nurse'; })
+      .map(function (m) { return m.text; }).slice(0, 12);
+    lastDebriefFacts =
+      'DEBRIEF FACTS (the only truth about this run). Scenario: ' + (SCN.title || '') +
+      ' — ' + (SCN.subtitle || '') + '. Outcome: ' + title + '. Total time: ' + fmt(summary.timeElapsedSeconds) +
+      '. True diagnosis (was hidden from the trainee): ' + String(summary.hiddenCondition || SCN.hiddenCondition || '') +
+      '. Definitive treatment: ' + key + '.' +
+      (acts.length ? ' Actions the trainee took, in order: ' + acts.join(' | ') + '.' : ' The trainee took no recorded actions.');
+
     return {
       title: title,
       body: 'Scenario time: ' + fmt(summary.timeElapsedSeconds) + '\n' +
@@ -7406,6 +7465,28 @@ if (typeof window !== 'undefined') {
             key + '\n\nFull debrief chart is on the desktop screen.'
     };
   }
+
+  // ---- debrief nurse (third voice) ---------------------------------------
+  // A separate ElevenLabs agent that only ever runs AFTER a case: the patient
+  // socket is closed first, so the two voices can never overlap. The run's
+  // facts go over as a contextual update the moment the socket is listening.
+  var lastDebriefFacts = '';
+  var DEBRIEF_AGENT_ID = 'agent_1601kzw2rqckevbab6phqzrjfz9e';
+  window.addEventListener('sim-debrief-voice', function () {
+    var vb = window.VoiceBridge;
+    if (!vb) return;
+    window.__scenarioVoiceAgentId = DEBRIEF_AGENT_ID;
+    Promise.resolve(vb.isActive() ? vb.stop() : null).then(function () {
+      return vb.start();               // called from a button press = user gesture
+    }).then(function () {
+      // Push the facts once the socket is up; retry briefly while connecting.
+      var tries = 0;
+      (function push() {
+        if (++tries > 20) return;
+        if (!vb.sendContext(lastDebriefFacts)) setTimeout(push, 400);
+      })();
+    });
+  });
 
   // =====================================================================
   // 4. AFTER-ACTION REPORT
@@ -12143,8 +12224,13 @@ if (typeof window !== 'undefined') {
 
     /* ---------------- tunables ---------------- */
     var CYAN        = '#00e5ff';
-    var PANEL_W_M   = 1.0;                 // panel width in metres
-    var PANEL_DIST  = 1.45;                // metres in front of the head (1.2 felt in-your-face on Quest)
+    // Sized and placed for DIRECT TOUCH: the panel has to sit inside arm's
+    // reach so a gloved finger can press it, which means it must also shrink
+    // or it fills the whole view. 0.62 m wide at 0.62 m out subtends about
+    // the same angle the old 1.0 m panel did at 1.45 m, so legibility is
+    // unchanged — it is just close enough to poke.
+    var PANEL_W_M   = 0.62;                // panel width in metres
+    var PANEL_DIST  = 0.62;                // metres in front of the head
     /* 1280x880 keeps the exact 1024x704 aspect (0.6875), so PANEL_H_M and the
        UV -> canvas-pixel button mapping are untouched — only texel density
        rises (text was fuzzy at 1024 across 1.0 m). All drawPanel metrics
@@ -12559,6 +12645,39 @@ if (typeof window !== 'undefined') {
       return { rec: rec, button: null };
     }
 
+    // Direct touch: is this world point (a fingertip) pressing a button?
+    // Same panel->UV->pixel->rect mapping as the raycast path, but driven by
+    // proximity instead of a ray, so a gloved hand can poke the glass.
+    // TOUCH_DEPTH is generous on the near side because fingers arrive with
+    // some overshoot; the panel is only ~1 cm of visual thickness.
+    var TOUCH_DEPTH = 0.055;
+    var tmpLocal = new THREE.Vector3();
+    function touchAt(worldPos) {
+      var best = null, bestDist = Infinity;
+      for (var id in panels) {
+        var rec = panels[id];
+        if (!rec.group.visible) continue;
+        tmpLocal.copy(worldPos);
+        rec.mesh.worldToLocal(tmpLocal);
+        var dz = Math.abs(tmpLocal.z);
+        if (dz > TOUCH_DEPTH) continue;
+        var hw = PANEL_W_M / 2, hh = PANEL_H_M / 2;
+        if (tmpLocal.x < -hw || tmpLocal.x > hw || tmpLocal.y < -hh || tmpLocal.y > hh) continue;
+        if (dz >= bestDist) continue;
+        var px = ((tmpLocal.x + hw) / PANEL_W_M) * CANVAS_W;
+        var py = ((hh - tmpLocal.y) / PANEL_H_M) * CANVAS_H;
+        var btns = rec.mesh.userData.buttons || [];
+        var found = null;
+        for (var i = 0; i < btns.length; i++) {
+          var r = btns[i].rect;
+          if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) { found = btns[i]; break; }
+        }
+        bestDist = dz;
+        best = { rec: rec, button: found };
+      }
+      return best;
+    }
+
     function onSelectStart(ev) {
       // Fires for controller trigger AND Quest hand-tracking pinch —
       // both arrive as the XR 'selectstart' event on the controller.
@@ -12701,6 +12820,20 @@ if (typeof window !== 'undefined') {
       setHUDLine: setHUDLine,
       update: update,
       dispose: dispose,
+      touchAt: touchAt,          // fingertip world-point -> {rec, button}
+      pressButton: function (hit) {
+        if (!hit || !hit.button || typeof hit.button.onSelect !== 'function') return false;
+        drawPanel(hit.rec, hit.button.index);   // press flash
+        hit.button.onSelect();
+        return true;
+      },
+      hoverButton: function (hit) {
+        // Repaint only on change: canvas repaints are the expensive part.
+        for (var id in panels) {
+          var want = (hit && hit.rec === panels[id] && hit.button) ? hit.button.index : -1;
+          if (panels[id].hoveredIdx !== want) drawPanel(panels[id], want);
+        }
+      },
       _panels: panels   // exposed for tests / debugging
     };
   };
