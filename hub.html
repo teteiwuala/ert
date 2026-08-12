@@ -3983,7 +3983,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
-  renderer.xr.addEventListener('sessionstart', function () { window.__crumb('xr-session-start'); });
+  renderer.xr.addEventListener('sessionstart', function () { window.__xrPresenting = true; window.__crumb('xr-session-start'); });
+  renderer.xr.addEventListener('sessionend', function () { window.__xrPresenting = false; window.__crumb('xr-session-end'); });
   document.getElementById('app').appendChild(renderer.domElement);
   // Quest kills WebGL contexts under memory pressure or headset doze. Without
   // preventDefault the context can never be restored; either way three.js
@@ -6744,6 +6745,14 @@ if (typeof window !== 'undefined') {
     SCN = window.MI_SCENARIO || window.ANAPHYLAXIS_SCENARIO;
     if (!SCN) { toast('Scenario data failed to load.'); return; }
     if (started) return;
+    // IN-HEADSET PATH: DOM overlays are invisible in an immersive session,
+    // and the key gate's input.focus() summons the system keyboard — which
+    // the Quest cannot composite over immersive content: it kills the whole
+    // browser ("browser has stopped", confirmed via the crash black-box).
+    // Skip both DOM steps and start the case directly: in VR the patient is
+    // voiced by the ElevenLabs agent and physiology runs on the scripted
+    // engine — no API key is wanted in-headset anyway.
+    if (window.__xrPresenting) { window.__crumb('begin-case(vr)'); beginCase(); return; }
     if (!hasKey()) showKeyGate(showBrief); else showBrief();
   });
 
@@ -6776,7 +6785,9 @@ if (typeof window !== 'undefined') {
     input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go.click(); });
     rowb.appendChild(skip); rowb.appendChild(go);
     card.appendChild(rowb);
-    r.appendChild(card); input.focus();
+    // Never focus while presenting: the Quest's system keyboard cannot show
+    // over an immersive session and force-kills the browser.
+    r.appendChild(card); if (!window.__xrPresenting) input.focus();
   }
 
   // =====================================================================
