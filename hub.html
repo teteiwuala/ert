@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b22');   // build marker: proves which deploy a run used
+  window.__crumb('boot b23');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5037,7 +5037,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 22 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 23 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -5894,23 +5894,64 @@ if (typeof window !== 'undefined') {
     return false;
   }
 
+  // Words that carry no clinical meaning; ignored when matching so natural
+  // speech lines up with the scenario's aliases.
+  var MATCH_STOPWORDS = {
+    the: 1, a: 1, an: 1, her: 1, his: 1, him: 1, she: 1, he: 1, them: 1, they: 1,
+    i: 1, im: 1, 'i\'m': 1, am: 1, is: 1, are: 1, was: 1, be: 1, being: 1, will: 1,
+    to: 1, of: 1, for: 1, on: 1, in: 1, at: 1, with: 1, and: 1, we: 1, lets: 1,
+    now: 1, please: 1, some: 1, this: 1, that: 1, it: 1, up: 1, going: 1, gonna: 1,
+    want: 1, need: 1, get: 1, got: 1, do: 1, doing: 1, then: 1, ok: 1, okay: 1
+  };
+  // Crude stemmer: speech inflects ("giving" vs the alias's "give",
+  // "shocking" vs "shock", "pads" vs "pad"), and an exact word test throws
+  // those away. Reducing both sides to a stem makes them meet.
+  function stem(w) {
+    if (w.length > 5 && /ing$/.test(w)) w = w.slice(0, -3);
+    else if (w.length > 4 && /ed$/.test(w)) w = w.slice(0, -2);
+    else if (w.length > 3 && /[^s]s$/.test(w)) w = w.slice(0, -1);
+    if (w.length > 3 && /e$/.test(w)) w = w.slice(0, -1);
+    return w;
+  }
+  function contentWords(s) {
+    return String(s || '').toLowerCase()
+      .replace(/[^a-z0-9%\s.]/g, ' ')
+      .split(/\s+/)
+      .filter(function (w) { return w && !MATCH_STOPWORDS[w]; })
+      .map(stem);
+  }
+
+  // Word-subset matching, NOT substring. Speech carries filler the alias
+  // tables never anticipate — "give her oxygen because her sats are dropping"
+  // does not contain the literal alias "give oxygen", so substring matching
+  // silently dropped textbook orders and the sim looked broken. An alias now
+  // matches when all of its meaningful words appear anywhere in the command.
   function matchIntervention(commandText) {
-    var text = String(commandText || '').toLowerCase();
+    var said = contentWords(commandText);
+    if (!said.length) return null;
+    var saidSet = {};
+    for (var s = 0; s < said.length; s++) saidSet[said[s]] = 1;
+
     var list = scenarioInterventions();
+    var best = null, bestScore = 0;
     for (var i = 0; i < list.length; i++) {
       var entry = list[i];
       var keys = entry.keywords || entry.aliases || entry.match || [];
       if (typeof keys === 'string') keys = [keys];
-      var names = [];
-      if (entry.name) names.push(String(entry.name));
-      if (entry.id) names.push(String(entry.id));
-      var candidates = keys.concat(names);
+      var candidates = keys.concat([entry.name, entry.id, entry.label].filter(Boolean));
       for (var j = 0; j < candidates.length; j++) {
-        var kw = String(candidates[j]).toLowerCase();
-        if (kw.length >= 3 && text.indexOf(kw) !== -1) return entry;
+        var words = contentWords(String(candidates[j]).replace(/[-_]/g, ' '));
+        if (!words.length) continue;
+        var hits = 0;
+        for (var k = 0; k < words.length; k++) if (saidSet[words[k]]) hits++;
+        // Every meaningful word of the alias must be present. Longer aliases
+        // win ties, so "repeat the epi" beats a bare "epi" when both fit.
+        if (hits === words.length && words.length > bestScore) {
+          bestScore = words.length; best = entry;
+        }
       }
     }
-    return null;
+    return best;
   }
 
   function hasRationale(text) {
@@ -7404,14 +7445,35 @@ if (typeof window !== 'undefined') {
   // alias data the engine matches on, so anything the engine can act upon is
   // recognized here — and nothing else is (chit-chat with the patient must
   // not advance the sim).
+  // Mirrors the engine's word-subset matcher (see matchIntervention): the two
+  // MUST agree, or the gate submits orders the engine then refuses to act on.
+  var GATE_STOP = { the:1,a:1,an:1,her:1,his:1,him:1,she:1,he:1,i:1,im:1,am:1,is:1,are:1,
+    to:1,of:1,for:1,on:1,in:1,at:1,with:1,and:1,we:1,now:1,please:1,some:1,this:1,that:1,
+    it:1,up:1,going:1,gonna:1,want:1,need:1,get:1,got:1,do:1,doing:1,then:1,ok:1,okay:1,lets:1 };
+  function gateStem(w) {
+    if (w.length > 5 && /ing$/.test(w)) w = w.slice(0, -3);
+    else if (w.length > 4 && /ed$/.test(w)) w = w.slice(0, -2);
+    else if (w.length > 3 && /[^s]s$/.test(w)) w = w.slice(0, -1);
+    if (w.length > 3 && /e$/.test(w)) w = w.slice(0, -1);
+    return w;
+  }
+  function gateWords(s) {
+    return String(s || '').toLowerCase().replace(/[^a-z0-9%\s.]/g, ' ')
+      .split(/\s+/).filter(function (w) { return w && !GATE_STOP[w]; }).map(gateStem);
+  }
   function matchesIntervention(lowerText) {
     if (!SCN || !SCN.interventions || !lowerText) return false;
+    var said = {}, w = gateWords(lowerText);
+    for (var s = 0; s < w.length; s++) said[w[s]] = 1;
     for (var i = 0; i < SCN.interventions.length; i++) {
       var iv = SCN.interventions[i];
       var cands = [iv.id, iv.label].concat(iv.aliases || []);
       for (var j = 0; j < cands.length; j++) {
-        var c = String(cands[j] || '').toLowerCase().replace(/[-_]/g, ' ');
-        if (c.length >= 4 && lowerText.indexOf(c) !== -1) return true;
+        var words = gateWords(String(cands[j] || '').replace(/[-_]/g, ' '));
+        if (!words.length) continue;
+        var hits = 0;
+        for (var k = 0; k < words.length; k++) if (said[words[k]]) hits++;
+        if (hits === words.length) return true;
       }
     }
     return false;
@@ -7457,7 +7519,14 @@ if (typeof window !== 'undefined') {
       autoTick = false;
     }, LIVE_TICK_MS);
   }
-  function stopLiveClock() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+  function stopLiveClock() {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    // Silence any queued coaching when the case ends — the debrief nurse
+    // must not be interrupted by a stale prompt from the case.
+    docQueue.length = 0;
+    if (docPump) { clearInterval(docPump); docPump = null; }
+    try { if (docAudio) docAudio.pause(); } catch (e) {}
+  }
 
   // ---- Dr. Okafor, the coaching voice -----------------------------------
   // THIRD VOICE, not the patient's. These lines used to be pushed into the
@@ -7477,19 +7546,47 @@ if (typeof window !== 'undefined') {
     speakerTimer = setTimeout(function () { emitHud(); }, 4000);
   }
 
-  var docAudio = null;
+  // ---- one voice at a time ----------------------------------------------
+  // Four speakers share the room (charge nurse handoff, patient, Dr. Okafor,
+  // debrief nurse). Played naively they talk over each other and none of them
+  // is intelligible. Pre-rendered clips go through this queue, which waits
+  // for the handoff to finish AND for the live patient agent to stop talking
+  // before it starts the next clip.
+  var docAudio = null, docQueue = [], docPump = null;
+  function anyHandoffPlaying() {
+    try {
+      for (var k in (window.__handoffCache || {})) {
+        var a = window.__handoffCache[k];
+        if (a && !a.paused && !a.ended) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function patientSpeaking() {
+    try { return window.VoiceBridge && window.VoiceBridge.state() === 'agent-speaking'; }
+    catch (e) { return false; }
+  }
+  function pumpDoctor() {
+    if (docPump) return;
+    docPump = setInterval(function () {
+      if (!docQueue.length) { clearInterval(docPump); docPump = null; return; }
+      if (docAudio && !docAudio.paused && !docAudio.ended) return;   // still talking
+      if (anyHandoffPlaying() || patientSpeaking()) return;          // wait our turn
+      var item = docQueue.shift();
+      try {
+        announceSpeaker('DR. OKAFOR');
+        docAudio = new Audio(item.src);
+        docAudio.play().then(function () { window.__crumb('doc-voice:' + item.index); }, function () {});
+      } catch (err) {}
+    }, 700);
+  }
   function speakDoctor(index, text) {
     appendLog('doctor', text);
-    announceSpeaker('DR. OKAFOR');
     var src = (SCN && SCN.doctorAudioPrefix) ? (SCN.doctorAudioPrefix + index + '.mp3') : null;
     if (!src) return;
-    try {
-      if (docAudio) { docAudio.pause(); }
-      // Never talk over the charge nurse's handoff — one voice at a time.
-      try { for (var hk in (window.__handoffCache || {})) window.__handoffCache[hk].pause(); } catch (e2) {}
-      docAudio = new Audio(src);
-      docAudio.play().then(function () { window.__crumb('doc-voice:' + index); }, function () {});
-    } catch (err) {}
+    docQueue.push({ src: src, index: index });
+    if (docQueue.length > 3) docQueue.splice(0, docQueue.length - 3);  // stale coaching helps nobody
+    pumpDoctor();
   }
 
   function renderTurn(st) {
