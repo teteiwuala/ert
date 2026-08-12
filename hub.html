@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b13');   // build marker: proves which deploy a run used
+  window.__crumb('boot b14');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4309,10 +4309,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   const inputs = [];
   for (let i = 0; i < 2; i++) {
     const ctrl = renderer.xr.getController(i);
+    // Short pointer ray + glowing tip: the old 5 m beam read as "long stick
+    // with a dot" and made aim feel disconnected from the hand.
     const line = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-5)]),
-      new THREE.LineBasicMaterial({ color: CY, transparent: true, opacity: 0.7 }));
-    line.name = 'ray'; ctrl.add(line); scene.add(ctrl);
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,-1.2)]),
+      new THREE.LineBasicMaterial({ color: CY, transparent: true, opacity: 0.55 }));
+    line.name = 'ray';
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8),
+      new THREE.MeshBasicMaterial({ color: CY, transparent: true, opacity: 0.9, depthTest: false }));
+    tip.position.set(0, 0, -1.2); tip.renderOrder = 11; line.add(tip);
+    ctrl.add(line); scene.add(ctrl);
     const rec = { obj: ctrl, connected: false };
     ctrl.addEventListener('connected', e => { rec.connected = true; rec.hand = (e.data && e.data.handedness) || ''; line.visible = !(e.data && e.data.hand); });
     ctrl.addEventListener('disconnected', () => rec.connected = false);
@@ -4866,7 +4872,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 14 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7032,10 +7038,6 @@ if (typeof window !== 'undefined') {
   function beginCase() {
     started = true; reported = false;
     cprOn = false; nudgesFired = {};
-    // Live heart view: the beating holographic heart auto-shows with the case
-    // so the trainee watches rhythm/rate react to every intervention. (It was
-    // voice-summonable only — "show the heart" still toggles it.)
-    emit('sim-heart-show', {});
     // Charge-nurse SBAR handoff, spoken aloud (pre-generated TTS asset — the
     // handoffScript text verbatim, in a third voice distinct from the patient
     // and the doctor). This is the in-headset replacement for the DOM brief,
@@ -7077,6 +7079,10 @@ if (typeof window !== 'undefined') {
     });
     buildHud();
     emit('sim-vitals-show', { normalRanges: SCN.normalRanges, scenario: SCN });   // hub spawns room+monitor
+    // Live heart view: auto-show AFTER the ward mounts — mountWard hides every
+    // pre-existing scene object, so summoning the heart earlier buried it for
+    // the whole case (the b11-b13 "no heart" bug). Voice can still toggle it.
+    emit('sim-heart-show', {});
     PatientLoop.start();   // fires onTurn(seed) itself — no manual render
   }
 
