@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b18');   // build marker: proves which deploy a run used
+  window.__crumb('boot b19');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5027,7 +5027,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 18 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 19 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -5720,7 +5720,11 @@ if (typeof window !== 'undefined') {
   var MAX_TOKENS = 1024;
   var KEY_STORE_NAME = 'nurse-sim-anthropic-key'; // shared with sibling tool — do not change
   var CALL_TIMEOUT_MS = 90000;
-  var DEFAULT_SECONDS_PER_TURN = 30;
+  // Cost of one action on the sim clock. This was 30 s back when a command was
+  // the ONLY thing that moved time; the UI now runs a real-time clock, so a
+  // 30 s jump per order would rocket past the scripted keyframes. 5 s keeps
+  // "acting costs time" true without fighting the wall clock.
+  var DEFAULT_SECONDS_PER_TURN = 5;
 
   // Physiologically sane clamp ranges for anything the model (or data) returns.
   var VITAL_RANGES = {
@@ -7213,10 +7217,7 @@ if (typeof window !== 'undefined') {
       try {
         window.DoctorLink.init({
           onOrder: function (action, rationale) {
-            var full = rationale ? (action + ' because ' + rationale) : action;
-            appendLog('you', '🎤 ' + full);
-            visualsFor(full);
-            Promise.resolve(PatientLoop.sendCommand(full)).catch(function () {});
+            submitVoiceOrder(rationale ? (action + ' because ' + rationale) : action, 'tool');
           },
           onShowHeart: function () { emit('sim-heart-show', {}); pushHeartState(PatientLoop.getState()); },
           onHideHeart: function () { emit('sim-heart-hide', {}); },
@@ -7225,15 +7226,20 @@ if (typeof window !== 'undefined') {
           onStatus: function (st) { setChip(st === 'listening' ? 'DR. OKAFOR LISTENING' : (st === 'agent-speaking' ? 'DR. OKAFOR' : (hasKey() ? 'LIVE AI' : 'SCRIPTED (offline)')), CY); },
           onTranscript: function (who, text) {
             if (who === 'you') {
-              // Deterministic sim-console commands: the agents' LLMs proved
-              // unreliable at calling the cosmetic show/hide_heart tools
-              // (telemetry: issue_order fires, show_heart never does), so the
-              // trainee's own transcript drives them directly.
+              // THE TRAINEE'S OWN WORDS DRIVE THE SIM. The voice agents run on
+              // a small fast LLM and call their tools only sometimes (measured:
+              // whole sessions with zero issue_order calls while the trainee
+              // gave textbook orders), which made the sim feel dead. So the
+              // ASR transcript is matched against the scenario's own
+              // intervention aliases here and submitted directly; a tool call
+              // for the same order still works and is de-duplicated below.
               var t = String(text || '').toLowerCase();
               if (/\b(show|bring up|display|open)\b.*\bheart\b/.test(t)) {
                 emit('sim-heart-show', {}); pushHeartState(PatientLoop.getState());
               } else if (/\b(hide|remove|clear|close)\b.*\bheart\b/.test(t)) {
                 emit('sim-heart-hide', {});
+              } else if (matchesIntervention(t)) {
+                submitVoiceOrder(String(text || ''), 'speech');
               }
               return;
             }
@@ -7259,6 +7265,7 @@ if (typeof window !== 'undefined') {
     // the whole case (the b11-b13 "no heart" bug). Voice can still toggle it.
     emit('sim-heart-show', {});
     PatientLoop.start();   // fires onTurn(seed) itself — no manual render
+    startLiveClock();      // the case now runs in real time
   }
 
   function buildHud() {
@@ -7334,6 +7341,59 @@ if (typeof window !== 'undefined') {
     emit('sim-heart-state', { mode: mode, hr: Math.max(v.hr, mode === 'vf' ? 0 : v.hr),
       contractility: Math.max(0, Math.min(1, v.sbp / 130)) });
   }
+  // ---- voice orders ------------------------------------------------------
+  // Does this utterance name one of the scenario's own interventions? Same
+  // alias data the engine matches on, so anything the engine can act upon is
+  // recognized here — and nothing else is (chit-chat with the patient must
+  // not advance the sim).
+  function matchesIntervention(lowerText) {
+    if (!SCN || !SCN.interventions || !lowerText) return false;
+    for (var i = 0; i < SCN.interventions.length; i++) {
+      var iv = SCN.interventions[i];
+      var cands = [iv.id, iv.label].concat(iv.aliases || []);
+      for (var j = 0; j < cands.length; j++) {
+        var c = String(cands[j] || '').toLowerCase().replace(/[-_]/g, ' ');
+        if (c.length >= 4 && lowerText.indexOf(c) !== -1) return true;
+      }
+    }
+    return false;
+  }
+
+  // One order per utterance: the transcript path and the agent's tool call can
+  // both describe the same action, so collapse near-duplicates inside a short
+  // window rather than double-advancing the clock.
+  var lastOrderText = '', lastOrderAt = 0;
+  function submitVoiceOrder(text, source) {
+    var full = String(text || '').trim();
+    if (!full || !started || reported) return;
+    var now = Date.now();
+    var norm = full.toLowerCase().replace(/[^a-z0-9 ]/g, '').slice(0, 60);
+    if (norm === lastOrderText && (now - lastOrderAt) < 12000) return;
+    lastOrderText = norm; lastOrderAt = now;
+    window.__crumb('order(' + source + ')');
+    appendLog('you', '🎤 ' + full);
+    visualsFor(full);
+    Promise.resolve(PatientLoop.sendCommand(full)).catch(function () {});
+  }
+
+  // ---- real-time clock ---------------------------------------------------
+  // The engine is turn-based: without a command the clock never moves, so the
+  // patient never deteriorates, the arrest never arrives and the attending's
+  // timed prompts never fire. On a screen that reads as "waiting for input";
+  // in a headset it reads as a dead room. Drive the sim clock from the wall
+  // clock instead, so the case runs whether or not the trainee acts — which
+  // is the whole point of a deterioration trainer.
+  var liveTimer = null;
+  var LIVE_TICK_MS = 5000, LIVE_TICK_SECONDS = 5;
+  function startLiveClock() {
+    stopLiveClock();
+    liveTimer = setInterval(function () {
+      if (!started || reported || busy) return;
+      try { PatientLoop.tickTime(LIVE_TICK_SECONDS); } catch (e) {}
+    }, LIVE_TICK_MS);
+  }
+  function stopLiveClock() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+
   // ---- Dr. Okafor, the coaching voice -----------------------------------
   // THIRD VOICE, not the patient's. These lines used to be pushed into the
   // live patient agent as contextual updates, so the PATIENT voiced the
@@ -7418,6 +7478,7 @@ if (typeof window !== 'undefined') {
   function finish(summary) {
     if (reported) return;
     reported = true; started = false; busy = false;
+    stopLiveClock();
     summary = summary || {};
     if (window.__xrPresenting) {
       // In-headset: keep the ward alive (hiding it disposes the in-world UI
