@@ -3914,7 +3914,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   'use strict';
 
   // ---- boot-error overlay: a blank page must explain itself --------------
+  var bootOverlayShown = false;
   window.addEventListener('error', function (e) {
+    if (bootOverlayShown) return;   // one overlay is enough; repeats would stack full-screen divs
+    bootOverlayShown = true;
     var d = document.createElement('div');
     d.style.cssText = 'position:fixed;inset:0;z-index:99999;padding:24px;background:#08111a;color:#7fdfff;font:14px/1.6 monospace;white-space:pre-wrap;overflow:auto';
     d.textContent = 'Error: ' + (e.message || '?') + '\nline ' + (e.lineno || '?') + '\n\n' + ((e.error && e.error.stack) || '');
@@ -3947,6 +3950,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
   document.getElementById('app').appendChild(renderer.domElement);
+  // Quest kills WebGL contexts under memory pressure or headset doze. Without
+  // preventDefault the context can never be restored; either way three.js
+  // cannot transparently rebuild this much scene state, so say so instead of
+  // leaving a silent black void.
+  renderer.domElement.addEventListener('webglcontextlost', function (e) {
+    e.preventDefault();
+    try {
+      var st = document.getElementById('status');
+      if (st) st.textContent = 'Graphics context lost — reload the page to continue.';
+    } catch (err) {}
+  });
 
   const scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x03070d, 0.055);
@@ -4595,9 +4609,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   // ---- main loop ----------------------------------------------------------
   let flatLast = 0, t0 = performance.now(), lastNow = 0;
+  let loopErrWarned = false;
   renderer.setAnimationLoop((t) => {
     const presenting = renderer.xr.isPresenting;
     if (!presenting) { if (document.hidden) return; if (t - flatLast < 33) return; flatLast = t; }
+    try {
     const now = (t - t0) / 1000;
 
     // dust drift
@@ -4643,6 +4659,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (wardFx) wardFx.update(dt, now);
     if (vitalsMon && latestVitals) vitalsMon.update(latestVitals, now);
     renderer.render(scene, camera);
+    } catch (loopErr) {
+      // One bad frame must not stop the animation loop: three.js schedules
+      // the next frame AFTER the callback returns, so an uncaught throw here
+      // freezes the last frame on the user's eyes — indistinguishable from a
+      // hard hang in-headset.
+      if (!loopErrWarned) { loopErrWarned = true; console.warn('[loop] frame error (loop kept alive):', loopErr); }
+    }
   });
   setStatus('Hub ready — click a module (or press Enter VR in a headset).');
 })();
@@ -10958,6 +10981,11 @@ if (typeof window !== 'undefined') {
   // with a small lead-in so chunk boundaries don't click.
   function playChunk(b64) {
     if (!ac) return;
+    // While the context is suspended (headset dozed, tab backgrounded)
+    // currentTime freezes and onended never fires, so scheduled buffers pile
+    // up as long as the agent talks. Drop audio instead of accumulating it;
+    // the length cap is a backstop for the same failure in disguise.
+    if (ac.state !== 'running' || liveSources.length > 200) return;
     const i16 = b64ToInt16(b64);
     const f32 = new Float32Array(i16.length);
     for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
@@ -11130,7 +11158,9 @@ if (typeof window !== 'undefined') {
     };
     ws.onmessage = (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      handle(msg);
+      // A malformed field inside one message (e.g. bad base64 audio) must not
+      // surface as an uncaught error; each message is independent.
+      try { handle(msg); } catch (e) { console.warn('[VoiceBridge] message handling failed:', e); }
     };
     ws.onerror = () => { if (!stopping) fail('The connection to the voice agent failed.'); };
     ws.onclose = () => {
