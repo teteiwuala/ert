@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b14');   // build marker: proves which deploy a run used
+  window.__crumb('boot b15');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4336,6 +4336,52 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     scene.add(hand);
     inputs.push(rec);
   }
+  // Hand-tracking joint visualization. Quest hand input renders NOTHING by
+  // default (r160 exposes hand.joints but draws no meshes), so tracked hands
+  // were invisible while the controller ray also hid itself — total feedback
+  // blackout. One InstancedMesh of tiny cyan spheres per hand = 1 draw call
+  // per hand (25 separate sphere meshes would cost 25). Joints are children
+  // of the hand object, so their .position is already in the hand's local
+  // space — instance matrices copy it directly. The 'connected' event carries
+  // e.data.hand only for true hand input (same signal that hides the
+  // controller ray line above), so nothing shows while physical controllers
+  // are held.
+  const handViz = (function () {
+    const JOINT_MAX = 25;                       // WebXR spec: 25 joints/hand
+    const jointGeo = new THREE.SphereGeometry(0.008, 8, 6);
+    const jointMat = new THREE.MeshBasicMaterial({ color: 0x9feaf5, transparent: true, opacity: 0.85 });
+    const m4 = new THREE.Matrix4();
+    const recs = [];
+    for (let i = 0; i < 2; i++) {
+      const hand = renderer.xr.getHand(i);
+      const inst = new THREE.InstancedMesh(jointGeo, jointMat, JOINT_MAX);
+      inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      inst.count = 0;
+      inst.frustumCulled = false;               // matrices change every frame
+      inst.raycast = function () {};            // never blocks UI rays
+      hand.add(inst);
+      const rec = { hand: hand, inst: inst, tracking: false };
+      hand.addEventListener('connected', e => { rec.tracking = !!(e.data && e.data.hand); });
+      hand.addEventListener('disconnected', () => { rec.tracking = false; inst.count = 0; });
+      recs.push(rec);
+    }
+    return {
+      update() {
+        for (const rec of recs) {
+          if (!rec.tracking || !rec.hand.joints) { rec.inst.count = 0; continue; }
+          let n = 0;
+          for (const name in rec.hand.joints) {
+            const j = rec.hand.joints[name];
+            if (!j || j.visible === false || n >= JOINT_MAX) continue;
+            m4.makeTranslation(j.position.x, j.position.y, j.position.z);
+            rec.inst.setMatrixAt(n++, m4);
+          }
+          rec.inst.count = n;
+          if (n) rec.inst.instanceMatrix.needsUpdate = true;
+        }
+      }
+    };
+  })();
   function xrPick(ctrl) {
     window.__crumb('xr-pick');
     tmpM.identity().extractRotation(ctrl.matrixWorld);
@@ -4383,7 +4429,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   //  start/turn/end. The holographic hub (panels/grid) is the lobby and is
   //  hidden while a scenario's 3D room is mounted, then restored on exit.
   let vitalsMon = null, latestVitals = null;
-  let ward = null, savedView = null, wardProps = null, wardFx = null, wardGrade = null;
+  let ward = null, savedView = null, wardProps = null, wardFx = null, wardGrade = null, wardDecor = null;
   const wardModels = { patient: null, clinician: null, loading: false, loaded: false };
 
   // Model placement (from asset recon): Fitness Character supine on the bed,
@@ -4513,6 +4559,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     if (!SAFE_MODE) {
       try { if (window.makeWardProps) wardProps = window.makeWardProps(THREE, scene, { patientArmWorld: { x: 0.05, y: 0.72, z: -1.5 } }); } catch (e) {}
+      try { if (window.makeWardDecor) wardDecor = window.makeWardDecor(THREE, scene, {}); } catch (e) {}
       try { if (window.makeWardFX)    wardFx    = window.makeWardFX(THREE, scene, {}); } catch (e) {}
     }
     try { if (!SAFE_MODE && window.WardAudio) { window.WardAudio.start(); if (latestVitals) window.WardAudio.setVitals(latestVitals); } } catch (e) {}
@@ -4528,7 +4575,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     try {
       if (!SAFE_MODE && typeof window.makeVRUI === 'function') {
         vrui = window.makeVRUI(THREE, scene, { renderer: renderer, camera: camera, rig: rig,
-          bounds: { minX: -2.2, maxX: 2.2, minZ: -2.0, maxZ: 4.2 } });
+          bounds: { minX: -2.2, maxX: 2.2, minZ: -2.0, maxZ: 2.3 } });  // maxZ hugs the (new) fourth wall at z=+2.5
       }
       if (!SAFE_MODE && typeof window.makePatientInteract === 'function' && scn && scn.touchZones) {
         pInteract = window.makePatientInteract(THREE, scene, {
@@ -4550,6 +4597,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     try { if (window.WardAudio) window.WardAudio.stop(); } catch (e) {}
     if (wardFx)    { try { wardFx.dispose(); }    catch (e) {} wardFx = null; }
     if (wardProps) { try { wardProps.dispose(); } catch (e) {} wardProps = null; }
+    if (wardDecor) { try { wardDecor.dispose(); } catch (e) {} wardDecor = null; }
     if (wardGrade) { try { wardGrade.dispose(); } catch (e) {} wardGrade = null; }
     if (pInteract) { try { pInteract.dispose(); } catch (e) {} pInteract = null; }
     if (vrui)      { try { vrui.dispose(); }      catch (e) {} vrui = null; }
@@ -4844,6 +4892,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     applyWalk(dt);
     if (pInteract) pInteract.update(dt);
     if (vrui) vrui.update(dt);
+    if (handViz && presenting) handViz.update();
     if (heartViz) heartViz.update(dt, now);
     updateActionFlashes(dt);
     if (ward && latestVitals) ward.update(latestVitals, dt);
@@ -4872,7 +4921,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 14 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 15 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7779,7 +7828,10 @@ if (typeof window !== 'undefined') {
     }
 
     // Warm key light: high front-side, tight soft shadows around the bed.
-    const key = new THREE.DirectionalLight(0x93a7c8, 0.45);
+    // (Was 0x93a7c8 — a blue-grey that read as a cold, after-hours room.
+    // Shifted toward 0xfff0dd; the cyan holograms stay emissive/additive so
+    // their contrast against the room survives the warmer bounce.)
+    const key = new THREE.DirectionalLight(0xc9beab, 0.45);
     key.position.set(2.4, 3.2, 1.6);
     key.target.position.set(BED_X, MATTRESS_TOP, BED_CZ - 0.3);
     key.castShadow = true;
@@ -7796,8 +7848,9 @@ if (typeof window !== 'undefined') {
     group.add(key.target);
     trackLight(key);
 
-    // Cool ambient fill: sky vs floor bounce.
-    const hemi = new THREE.HemisphereLight(0x2e3c52, 0x1d1b18, 0.22);
+    // Ambient fill: sky vs floor bounce. Warmed from 0x2e3c52/0.22 and lifted
+    // ~14% — the room read dark and solemn with the cool fill.
+    const hemi = new THREE.HemisphereLight(0x4a443a, 0x241f19, 0.25);
     group.add(hemi);
     trackLight(hemi);
 
@@ -9432,6 +9485,346 @@ if (typeof window !== 'undefined') {
     }
 
     return { group: group, dispose: dispose };
+  };
+})();
+
+</script>
+<script>
+/* ward-decor.js — warmth + "lived-in" dressing for the ward-scene.js room.
+ *
+ * The bare room read cold, dark and empty. This module adds ONLY what the
+ * scene and ward-props modules do not already build:
+ *   - a warm hemisphere fill + one warm ceiling-corner PointLight
+ *   - a daylight sky/cloud/skyline canvas fitted inside the left-wall window
+ *     opening (occludes the old night gradient that sat behind the glass)
+ *   - the MISSING fourth wall at z=+2.5 — ward-props mounts a door, clock,
+ *     sanitizer and whiteboard against that plane, but nothing built the
+ *     wall itself, so looking toward +z was fogged void
+ *   - framed anatomy + hand-hygiene posters on the back wall
+ *   - 3 recessed ceiling light panels (the ceiling plane exists but had a
+ *     single fixture over the bed; the rest read as a dark lid)
+ *   - bedside cabinet (canvas drawer front) with water jug, cup and a small
+ *     potted plant, left of the bed head
+ * Clock / whiteboard / privacy curtain / visitor chair / sanitizer are NOT
+ * duplicated here — ward-props already places them.
+ *
+ * Quest-3 budget: 19 draw calls, ~2.4 MB of canvas textures (≤512 px each),
+ * 2 lights, zero per-frame work (update() is a no-op — everything static).
+ * Three.js r160, no imports. window.makeWardDecor(THREE, scene, opts)
+ * -> { update(dt, now), dispose() } with tracked resources freed on dispose.
+ */
+(function () {
+  'use strict';
+
+  window.makeWardDecor = function (THREE, scene, opts) {
+    opts = opts || {};
+    var ROOM_W = 5.0, ROOM_D = 5.0, ROOM_H = 2.7;
+
+    var group = new THREE.Group();
+    group.name = 'wardDecor';
+
+    // ---- resource tracking for dispose() -------------------------------
+    var geometries = [], materials = [], textures = [], lights = [];
+    function geo(g) { geometries.push(g); return g; }
+    function mat(m) { materials.push(m); return m; }
+    function std(p) { return mat(new THREE.MeshStandardMaterial(p)); }
+    function canvasTex(w, h, draw) {
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      draw(c.getContext('2d'), w, h);
+      var t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace;
+      textures.push(t);
+      return t;
+    }
+    function mesh(g, m, x, y, z) {
+      var me = new THREE.Mesh(g, m);
+      me.position.set(x || 0, y || 0, z || 0);
+      return me;
+    }
+
+    // ---- shared muted-hospital-palette materials ------------------------
+    var creamMat = std({ color: 0xf0ead9, roughness: 0.7, metalness: 0.02 });
+    var tealMat  = std({ color: 0xb9d6cf, roughness: 0.6, metalness: 0.05 });
+    var steelMat = std({ color: 0x9aa1a8, roughness: 0.4, metalness: 0.6 });
+
+    // =====================================================================
+    // 1) WARMTH — hemisphere fill + one warm ceiling-corner practical.
+    //    Low intensities: the cyan holograms (emissive/additive, unlit)
+    //    must keep their contrast against the room.
+    // =====================================================================
+    var warmHemi = new THREE.HemisphereLight(0xfff2e2, 0x2e2820, 0.3);
+    group.add(warmHemi); lights.push(warmHemi);
+    var warmFill = new THREE.PointLight(0xffe3bd, 0.9, 6.0, 2);
+    warmFill.position.set(0.9, ROOM_H - 0.3, 0.7);
+    group.add(warmFill); lights.push(warmFill);
+
+    // =====================================================================
+    // 2) WINDOW DAYLIGHT — sky + clouds + distant skyline canvas inside the
+    //    left-wall opening (x=-2.5, z -1.75..-0.25, y 1.0..2.1, faces +x).
+    //    toneMapped:false so ACES exposure (0.72) can't dim it: it must read
+    //    brighter than any lit surface, i.e. like actual daylight.
+    // =====================================================================
+    (function windowView() {
+      var tex = canvasTex(512, 384, function (g, w, h) {
+        var hy = Math.round(h * 0.68);          // horizon line
+        // sky gradient
+        var sky = g.createLinearGradient(0, 0, 0, hy);
+        sky.addColorStop(0, '#6fb9e8');
+        sky.addColorStop(0.6, '#a8d5f0');
+        sky.addColorStop(1, '#e8f3f2');
+        g.fillStyle = sky;
+        g.fillRect(0, 0, w, hy);
+        // soft sun glow, upper right
+        var sun = g.createRadialGradient(w * 0.78, h * 0.16, 4, w * 0.78, h * 0.16, 90);
+        sun.addColorStop(0, 'rgba(255,250,225,0.95)');
+        sun.addColorStop(1, 'rgba(255,250,225,0)');
+        g.fillStyle = sun;
+        g.fillRect(0, 0, w, hy);
+        // soft cumulus: clusters of overlapping radial blobs
+        function cloud(cx, cy, s, a) {
+          [[0, 0, 1], [-0.9, 0.15, 0.7], [0.9, 0.18, 0.75], [-0.35, -0.3, 0.6], [0.45, -0.25, 0.65]]
+            .forEach(function (b) {
+              var r = s * b[2];
+              var cg = g.createRadialGradient(cx + b[0] * s, cy + b[1] * s, 1, cx + b[0] * s, cy + b[1] * s, r);
+              cg.addColorStop(0, 'rgba(255,255,255,' + a + ')');
+              cg.addColorStop(0.7, 'rgba(255,255,255,' + a * 0.55 + ')');
+              cg.addColorStop(1, 'rgba(255,255,255,0)');
+              g.fillStyle = cg;
+              g.beginPath(); g.arc(cx + b[0] * s, cy + b[1] * s, r, 0, Math.PI * 2); g.fill();
+            });
+        }
+        cloud(w * 0.24, h * 0.20, 34, 0.9);
+        cloud(w * 0.62, h * 0.34, 26, 0.75);
+        cloud(w * 0.88, h * 0.46, 20, 0.6);
+        // distant city skyline: far pale band, then nearer blue-grey blocks
+        g.fillStyle = '#b9cbd6';
+        for (var x = 0; x < w; x += 26) {
+          var bh = 14 + ((x * 7919) % 23);
+          g.fillRect(x, hy - bh, 20, bh);
+        }
+        g.fillStyle = '#8fa3b1';
+        for (x = 8; x < w; x += 42) {
+          var bh2 = 26 + ((x * 6151) % 40);
+          g.fillRect(x, hy - bh2, 26, bh2);
+          // a few sun-catching window specks
+          g.fillStyle = 'rgba(255,255,240,0.8)';
+          g.fillRect(x + 6, hy - bh2 + 8, 3, 3);
+          g.fillRect(x + 15, hy - bh2 + 18, 3, 3);
+          g.fillStyle = '#8fa3b1';
+        }
+        // foreground: hazy green park band down to the sill
+        var ground = g.createLinearGradient(0, hy, 0, h);
+        ground.addColorStop(0, '#cfe0d2');
+        ground.addColorStop(1, '#b7cdbb');
+        g.fillStyle = ground;
+        g.fillRect(0, hy, w, h - hy);
+      });
+      var m = mat(new THREE.MeshBasicMaterial({ map: tex, fog: false, toneMapped: false }));
+      // 1.7 x 1.3 overfills the 1.5 x 1.1 opening so no room shows past the frame
+      var quad = mesh(geo(new THREE.PlaneGeometry(1.7, 1.3)), m, -2.55, 1.55, -1.0);
+      quad.rotation.y = Math.PI / 2;             // face +x, into the room
+      group.add(quad);
+    })();
+
+    // =====================================================================
+    // 3) FOURTH WALL at z=+2.5 — same finish as the ward-scene walls. The
+    //    door / clock / sanitizer / whiteboard from ward-props sit against
+    //    this plane. (NOTE: vrui locomotion bounds still allow z up to 4.2,
+    //    so walking through it is possible — better than staring into void.)
+    // =====================================================================
+    var frontWallMat = std({ color: 0xdfe4dc, roughness: 0.92, metalness: 0.0 });
+    var frontWall = mesh(geo(new THREE.BoxGeometry(ROOM_W, ROOM_H, 0.08)), frontWallMat, 0, ROOM_H / 2, ROOM_D / 2 + 0.04);
+    frontWall.receiveShadow = true;
+    group.add(frontWall);
+
+    // =====================================================================
+    // 4) BACK-WALL POSTERS (z=-2.5 inner face, facing +z): framed anatomy
+    //    chart + hand-hygiene steps. Clear of the services panel (x -1.2..0.4).
+    // =====================================================================
+    var posterFrameMat = std({ color: 0x4d5359, roughness: 0.5, metalness: 0.3 });
+    var posterFrameGeo = geo(new THREE.BoxGeometry(0.46, 0.64, 0.02));
+
+    function fakeTextLines(g, x, y, wMax, n, color) {
+      g.fillStyle = color;
+      for (var i = 0; i < n; i++) {
+        g.fillRect(x, y + i * 12, wMax * (0.55 + ((i * 37) % 10) / 22), 5);
+      }
+    }
+
+    (function anatomyPoster() {
+      var tex = canvasTex(256, 384, function (g, w, h) {
+        g.fillStyle = '#f6f3ea'; g.fillRect(0, 0, w, h);
+        g.fillStyle = '#2b4a6f'; g.fillRect(0, 0, w, 42);
+        g.fillStyle = '#f6f3ea';
+        g.font = 'bold 20px system-ui, sans-serif';
+        g.textAlign = 'center';
+        g.fillText('CARDIOVASCULAR SYSTEM', w / 2, 28);
+        // torso outline
+        g.strokeStyle = '#b08a72'; g.lineWidth = 3;
+        g.beginPath();
+        g.moveTo(w * 0.34, 70);
+        g.quadraticCurveTo(w * 0.5, 56, w * 0.66, 70);   // shoulders
+        g.quadraticCurveTo(w * 0.72, 160, w * 0.64, 260); // right side
+        g.quadraticCurveTo(w * 0.5, 276, w * 0.36, 260);  // hips
+        g.quadraticCurveTo(w * 0.28, 160, w * 0.34, 70);  // left side
+        g.stroke();
+        // lungs (pale) + heart (red)
+        g.fillStyle = 'rgba(150,170,190,0.55)';
+        g.beginPath(); g.ellipse(w * 0.40, 140, 20, 38, 0.15, 0, Math.PI * 2); g.fill();
+        g.beginPath(); g.ellipse(w * 0.60, 140, 20, 38, -0.15, 0, Math.PI * 2); g.fill();
+        g.fillStyle = '#b3202a';
+        g.beginPath(); g.ellipse(w * 0.51, 152, 15, 19, -0.5, 0, Math.PI * 2); g.fill();
+        // aorta arch
+        g.strokeStyle = '#b3202a'; g.lineWidth = 5;
+        g.beginPath(); g.moveTo(w * 0.51, 136); g.quadraticCurveTo(w * 0.46, 108, w * 0.54, 100); g.stroke();
+        // label leader lines + caption blocks
+        g.strokeStyle = '#43536a'; g.lineWidth = 1.5;
+        g.beginPath(); g.moveTo(w * 0.56, 150); g.lineTo(w * 0.84, 128); g.stroke();
+        g.beginPath(); g.moveTo(w * 0.42, 122); g.lineTo(w * 0.14, 104); g.stroke();
+        fakeTextLines(g, w * 0.06, 290, w * 0.88, 5, 'rgba(60,70,90,0.6)');
+      });
+      var frame = mesh(posterFrameGeo, posterFrameMat, -1.85, 1.62, -2.49);
+      group.add(frame);
+      var p = mesh(geo(new THREE.PlaneGeometry(0.4, 0.58)),
+        std({ map: tex, roughness: 0.85, metalness: 0.0 }), -1.85, 1.62, -2.478);
+      group.add(p);
+    })();
+
+    (function hygienePoster() {
+      var tex = canvasTex(256, 384, function (g, w, h) {
+        g.fillStyle = '#ffffff'; g.fillRect(0, 0, w, h);
+        g.fillStyle = '#1f7a68'; g.fillRect(0, 0, w, 46);
+        g.fillStyle = '#ffffff';
+        g.font = 'bold 22px system-ui, sans-serif';
+        g.textAlign = 'center';
+        g.fillText('HAND HYGIENE', w / 2, 30);
+        g.font = 'bold 13px system-ui, sans-serif';
+        g.fillStyle = '#1f7a68';
+        g.fillText('5 MOMENTS · 20 SECONDS', w / 2, 62);
+        // 6 step cells: numbered circles + stylized palm shapes
+        for (var i = 0; i < 6; i++) {
+          var cx = w * (i % 2 ? 0.72 : 0.28);
+          var cy = 110 + Math.floor(i / 2) * 88;
+          g.strokeStyle = '#d3ded9'; g.lineWidth = 2;
+          g.strokeRect(cx - 52, cy - 34, 104, 72);
+          // palm: ellipse + finger studs
+          g.fillStyle = '#e8b796';
+          g.beginPath(); g.ellipse(cx, cy + 8, 18, 14, 0.3 * (i % 2 ? -1 : 1), 0, Math.PI * 2); g.fill();
+          for (var f = 0; f < 4; f++) {
+            g.beginPath(); g.ellipse(cx - 12 + f * 8, cy - 8, 3.4, 9, 0, 0, Math.PI * 2); g.fill();
+          }
+          g.fillStyle = '#1f7a68';
+          g.beginPath(); g.arc(cx - 42, cy - 24, 10, 0, Math.PI * 2); g.fill();
+          g.fillStyle = '#ffffff';
+          g.font = 'bold 13px system-ui, sans-serif';
+          g.fillText(String(i + 1), cx - 42, cy - 19);
+        }
+      });
+      var frame = mesh(posterFrameGeo, posterFrameMat, 1.55, 1.62, -2.49);
+      group.add(frame);
+      var p = mesh(geo(new THREE.PlaneGeometry(0.4, 0.58)),
+        std({ map: tex, roughness: 0.85, metalness: 0.0 }), 1.55, 1.62, -2.478);
+      group.add(p);
+    })();
+
+    // =====================================================================
+    // 5) RECESSED CEILING PANELS — the ceiling exists (ward-scene builds it)
+    //    but only the over-bed fixture lit it; the rest read as a dark lid.
+    //    Emissive canvas planes only (the two lights above do the lighting).
+    // =====================================================================
+    (function ceilingPanels() {
+      var tex = canvasTex(128, 128, function (g, w, h) {
+        g.fillStyle = '#8d9297'; g.fillRect(0, 0, w, h);        // trim bezel
+        var lit = g.createRadialGradient(w / 2, h / 2, 6, w / 2, h / 2, w * 0.62);
+        lit.addColorStop(0, '#fff6e4');
+        lit.addColorStop(0.75, '#f7ecd6');
+        lit.addColorStop(1, '#d9d2c2');
+        g.fillStyle = lit;
+        g.fillRect(5, 5, w - 10, h - 10);
+      });
+      var m = mat(new THREE.MeshBasicMaterial({ map: tex, fog: false, toneMapped: false }));
+      var g55 = geo(new THREE.PlaneGeometry(0.55, 0.55));
+      [[1.35, 0.9], [-1.35, 0.9], [1.35, -1.1]].forEach(function (p) {
+        var panel = mesh(g55, m, p[0], ROOM_H - 0.005, p[1]);
+        panel.rotation.x = Math.PI / 2;          // face down into the room
+        group.add(panel);
+      });
+    })();
+
+    // =====================================================================
+    // 6) BEDSIDE CABINET + water jug + cup + potted plant, left of the bed
+    //    head (bed x=-0.4, head z=-2.35; clinician stands at x=-1.2,z=-1.2).
+    //    Drawer detail is painted — 3 draw calls instead of ~8 boxes.
+    // =====================================================================
+    (function bedsideCabinet() {
+      var CX = -1.5, CZ = -2.0;
+      group.add(mesh(geo(new THREE.BoxGeometry(0.45, 0.72, 0.42)), creamMat, CX, 0.36, CZ));
+      var frontTex = canvasTex(128, 192, function (g, w, h) {
+        g.fillStyle = '#f0ead9'; g.fillRect(0, 0, w, h);
+        [14, 100].forEach(function (dy) {
+          g.fillStyle = 'rgba(90,86,74,0.28)';
+          g.fillRect(8, dy, w - 16, 78);
+          g.fillStyle = '#ece5d2';
+          g.fillRect(10, dy + 2, w - 20, 74);
+          g.fillStyle = '#8f959c';                 // steel bar handle
+          g.fillRect(w / 2 - 22, dy + 12, 44, 7);
+        });
+      });
+      var front = mesh(geo(new THREE.PlaneGeometry(0.43, 0.66)),
+        std({ map: frontTex, roughness: 0.7, metalness: 0.05 }), CX, 0.37, CZ + 0.211);
+      group.add(front);
+      group.add(mesh(geo(new THREE.BoxGeometry(0.48, 0.02, 0.45)), tealMat, CX, 0.735, CZ));
+
+      // water jug (translucent) + cup
+      var jugMat = std({ color: 0xcfe6ea, roughness: 0.3, metalness: 0.0, transparent: true, opacity: 0.7 });
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.045, 0.05, 0.15, 10)), jugMat, CX - 0.09, 0.745 + 0.075, CZ - 0.06));
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.028, 0.024, 0.07, 10)), tealMat, CX + 0.06, 0.745 + 0.035, CZ + 0.08));
+
+      // potted plant: terracotta pot + 3 crossed alpha-tested leaf planes
+      var potMat = std({ color: 0xb46a4a, roughness: 0.8, metalness: 0.0 });
+      group.add(mesh(geo(new THREE.CylinderGeometry(0.048, 0.036, 0.09, 10)), potMat, CX + 0.12, 0.745 + 0.045, CZ - 0.1));
+      var leafTex = canvasTex(128, 128, function (g, w, h) {
+        g.clearRect(0, 0, w, h);
+        g.fillStyle = '#3f7a4b';
+        for (var i = 0; i < 7; i++) {
+          var a = -Math.PI / 2 + (i - 3) * 0.38;
+          g.save();
+          g.translate(w / 2, h - 6);
+          g.rotate(a);
+          g.beginPath();
+          g.ellipse(0, -h * 0.32, 8 + (i % 3) * 2, h * 0.30, 0, 0, Math.PI * 2);
+          g.fill();
+          g.restore();
+        }
+      });
+      var leafMat = std({ map: leafTex, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.9, metalness: 0.0 });
+      var leafGeo = geo(new THREE.PlaneGeometry(0.18, 0.2));
+      for (var li = 0; li < 3; li++) {
+        var leaf = mesh(leafGeo, leafMat, CX + 0.12, 0.745 + 0.09 + 0.095, CZ - 0.1);
+        leaf.rotation.y = li * Math.PI / 3;
+        group.add(leaf);
+      }
+    })();
+
+    // ---------------------------------------------------------------------
+    scene.add(group);
+
+    function dispose() {
+      if (group.parent) group.parent.remove(group);
+      lights.forEach(function (l) { try { l.dispose(); } catch (e) {} });
+      var seen = new Set();
+      geometries.concat(materials).concat(textures).forEach(function (r) {
+        if (r && !seen.has(r)) { seen.add(r); try { r.dispose(); } catch (e) {} }
+      });
+      geometries.length = 0; materials.length = 0; textures.length = 0; lights.length = 0;
+    }
+
+    // Everything is static — no-op keeps the module contract without adding
+    // per-frame cost (mountWard intentionally does not call this from the loop).
+    function update(dt, now) {}
+
+    return { group: group, update: update, dispose: dispose };
   };
 })();
 
@@ -11634,7 +12027,12 @@ if (typeof window !== 'undefined') {
     var CYAN        = '#00e5ff';
     var PANEL_W_M   = 1.0;                 // panel width in metres
     var PANEL_DIST  = 1.45;                // metres in front of the head (1.2 felt in-your-face on Quest)
-    var CANVAS_W    = 1024, CANVAS_H = 704;
+    /* 1280x880 keeps the exact 1024x704 aspect (0.6875), so PANEL_H_M and the
+       UV -> canvas-pixel button mapping are untouched — only texel density
+       rises (text was fuzzy at 1024 across 1.0 m). All drawPanel metrics
+       scale via S = CANVAS_W / 1024, and button rects are generated in the
+       same scaled pixel space the raycast converts UVs into. */
+    var CANVAS_W    = 1280, CANVAS_H = 880;
     var PANEL_H_M   = PANEL_W_M * (CANVAS_H / CANVAS_W);
     var HUD_W_M     = 0.66, HUD_H_M = 0.062;
     var HUD_DIST    = 1.1;                 // metres from head
@@ -11738,61 +12136,86 @@ if (typeof window !== 'undefined') {
 
     /* Draw the full panel (glass, title, body, button pills) and
        record button rects in canvas pixels. hoveredIdx = index of the
-       button under a controller ray, or -1. */
+       button under a controller ray, or -1.
+       Refined-glass pass: bigger corner radius, 1px inner hairline +
+       top-edge sheen, letter-spaced title over a cyan accent underline,
+       1.45x body leading, pill buttons with a hard fill/outline hover
+       flip. Everything scales with S so the canvas resolution can change
+       without re-tuning the layout. */
     function drawPanel(rec, hoveredIdx) {
-      var g = rec.ctx, W = CANVAS_W, H = CANVAS_H;
+      var g = rec.ctx, W = CANVAS_W, H = CANVAS_H, S = CANVAS_W / 1024;
       var def = rec.def;
       g.clearRect(0, 0, W, H);
 
-      // glass body
-      roundRect(g, 6, 6, W - 12, H - 12, 34);
+      // glass body — soft dark gradient inside a wide-radius shell
+      var R = 46 * S;
+      roundRect(g, 6 * S, 6 * S, W - 12 * S, H - 12 * S, R);
       var bg = g.createLinearGradient(0, 0, 0, H);
-      bg.addColorStop(0, 'rgba(8,26,40,0.88)');
-      bg.addColorStop(1, 'rgba(4,14,24,0.82)');
+      bg.addColorStop(0, 'rgba(9,28,42,0.90)');
+      bg.addColorStop(0.55, 'rgba(6,19,31,0.85)');
+      bg.addColorStop(1, 'rgba(4,13,23,0.82)');
       g.fillStyle = bg;
       g.fill();
-      g.lineWidth = 3;
-      g.strokeStyle = 'rgba(0,229,255,0.85)';
+      g.lineWidth = 2.5 * S;
+      g.strokeStyle = 'rgba(0,229,255,0.72)';
       g.stroke();
-      // inner top sheen
-      roundRect(g, 14, 14, W - 28, 70, 24);
-      g.fillStyle = 'rgba(0,229,255,0.06)';
-      g.fill();
 
-      var pad = 52;
+      // 1px inner hairline (crisp edge the thick outer stroke lacks)
+      roundRect(g, 11 * S, 11 * S, W - 22 * S, H - 22 * S, R - 6 * S);
+      g.lineWidth = 1;
+      g.strokeStyle = 'rgba(175,240,255,0.28)';
+      g.stroke();
 
-      // title
+      // top-edge highlight: faint cool sheen fading out over the header band
+      g.save();
+      roundRect(g, 11 * S, 11 * S, W - 22 * S, H - 22 * S, R - 6 * S);
+      g.clip();
+      var sheen = g.createLinearGradient(0, 10 * S, 0, 130 * S);
+      sheen.addColorStop(0, 'rgba(205,244,255,0.10)');
+      sheen.addColorStop(1, 'rgba(205,244,255,0)');
+      g.fillStyle = sheen;
+      g.fillRect(0, 0, W, 132 * S);
+      g.restore();
+
+      var pad = 56 * S;
+
+      // title bar — larger letter-spaced type + thin cyan underline accent
       if (def.title) {
-        g.font = '600 46px "Segoe UI", system-ui, sans-serif';
+        g.font = '600 ' + Math.round(50 * S) + 'px "Segoe UI", system-ui, sans-serif';
+        try { g.letterSpacing = Math.round(2.5 * S) + 'px'; } catch (eLS) {}
         g.fillStyle = CYAN;
         g.textBaseline = 'top';
         g.textAlign = 'left';
-        g.shadowColor = 'rgba(0,229,255,0.7)';
-        g.shadowBlur = 14;
-        g.fillText(String(def.title), pad, 44, W - pad * 2);
+        g.shadowColor = 'rgba(0,229,255,0.65)';
+        g.shadowBlur = 16 * S;
+        g.fillText(String(def.title), pad, 40 * S, W - pad * 2);
         g.shadowBlur = 0;
-        // divider
-        g.fillStyle = 'rgba(0,229,255,0.35)';
-        g.fillRect(pad, 112, W - pad * 2, 2);
+        try { g.letterSpacing = '0px'; } catch (eLS2) {}
+        // hairline divider with a brighter accent segment at the left
+        g.fillStyle = 'rgba(0,229,255,0.25)';
+        g.fillRect(pad, 112 * S, W - pad * 2, Math.max(1, 1.5 * S));
+        g.fillStyle = 'rgba(0,229,255,0.9)';
+        g.fillRect(pad, 110.5 * S, 132 * S, 3 * S);
       }
 
       // buttons row geometry first (body must not overlap it)
       var btns = def.buttons || [];
-      var btnH = 86, btnBottom = 44;
+      var btnH = 88 * S, btnBottom = 44 * S;
       var btnY = H - btnBottom - btnH;
-      var bodyTop = def.title ? 138 : 48;
-      var bodyBottom = btns.length ? btnY - 26 : H - 48;
+      var bodyTop = (def.title ? 142 : 48) * S;
+      var bodyBottom = btns.length ? btnY - 26 * S : H - 48 * S;
 
-      // body
+      // body — ~1.45x leading for comfortable in-headset reading
       rec.mesh.userData.buttons = [];
       if (def.body) {
         var body = String(def.body);
         if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY - 1) + '…';
-        g.font = '30px "Segoe UI", system-ui, sans-serif';
-        g.fillStyle = 'rgba(225,245,255,0.95)';
+        var bodyPx = Math.round(31 * S);
+        g.font = bodyPx + 'px "Segoe UI", system-ui, sans-serif';
+        g.fillStyle = 'rgba(228,246,255,0.96)';
         g.textBaseline = 'top';
         g.textAlign = 'left';
-        var lineH = 42;
+        var lineH = Math.round(bodyPx * 1.45);
         var maxLines = Math.max(1, Math.floor((bodyBottom - bodyTop) / lineH));
         var paras = body.split(/\n+/), lines = [];
         for (var p = 0; p < paras.length && lines.length < maxLines; p++) {
@@ -11804,12 +12227,13 @@ if (typeof window !== 'undefined') {
         }
       }
 
-      // buttons — rounded cyan pills, centred along the bottom
+      // buttons — pills centred along the bottom; hover = filled, idle =
+      // outline with a whisper of fill. Consistent 2px stroke inset.
       if (btns.length) {
-        g.font = '600 34px "Segoe UI", system-ui, sans-serif';
-        var gap = 28, widths = [], total = 0;
+        g.font = '600 ' + Math.round(34 * S) + 'px "Segoe UI", system-ui, sans-serif';
+        var gap = 30 * S, widths = [], total = 0;
         for (var b = 0; b < btns.length; b++) {
-          var w = Math.ceil(g.measureText(String(btns[b].label || '')).width) + 76;
+          var w = Math.ceil(g.measureText(String(btns[b].label || '')).width) + 84 * S;
           widths.push(w);
           total += w;
         }
@@ -11818,18 +12242,18 @@ if (typeof window !== 'undefined') {
         for (b = 0; b < btns.length; b++) {
           var bw = widths[b], hovered = (b === hoveredIdx);
           roundRect(g, x, btnY, bw, btnH, btnH / 2);
-          g.fillStyle = hovered ? 'rgba(0,229,255,0.55)' : 'rgba(0,229,255,0.14)';
+          g.fillStyle = hovered ? 'rgba(0,229,255,0.90)' : 'rgba(0,229,255,0.08)';
           g.fill();
-          g.lineWidth = hovered ? 4 : 2.5;
-          g.strokeStyle = hovered ? '#aef6ff' : 'rgba(0,229,255,0.9)';
+          g.lineWidth = 2 * S;
+          g.strokeStyle = hovered ? '#dafcff' : 'rgba(0,229,255,0.85)';
           g.shadowColor = 'rgba(0,229,255,0.8)';
-          g.shadowBlur = hovered ? 22 : 8;
+          g.shadowBlur = (hovered ? 26 : 9) * S;
           g.stroke();
           g.shadowBlur = 0;
-          g.fillStyle = hovered ? '#03222e' : CYAN;
+          g.fillStyle = hovered ? '#04252f' : CYAN;
           g.textAlign = 'center';
           g.textBaseline = 'middle';
-          g.fillText(String(btns[b].label || ''), x + bw / 2, btnY + btnH / 2 + 2);
+          g.fillText(String(btns[b].label || ''), x + bw / 2, btnY + btnH / 2 + 2 * S);
           g.textAlign = 'left';
           g.textBaseline = 'top';
           rec.mesh.userData.buttons.push({
