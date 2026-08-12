@@ -4389,6 +4389,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   // compile them all synchronously in one frame — a multi-second GPU stall
   // that the Quest OS answers by killing the browser ("browser has stopped").
   let wardWarming = false;
+  let warmScene = null;      // tiny black scene rendered during warm-up so XR frames keep flowing
+  // ?safe=1 — headset bisect mode: mount ONLY the bare ward room (no models,
+  // no monitor, no interaction layer, no audio). If the bare room survives a
+  // module tap on the Quest, the crash lives in one of the skipped pieces.
+  const SAFE_MODE = (function () {
+    try { return /[?&]safe=1/.test(location.search); } catch (e) { return false; }
+  })();
   function mountWard(scn) {
     if (ward || typeof window.makeWardScene !== 'function') return;
     // Hide every current hub object except the camera rig; remember visibility.
@@ -4405,8 +4412,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       renderer: renderer, camera: camera,
       // On memory-constrained GPUs, drop the second character entirely (the patient
       // already borrowed her texture during preload, so he stays fully textured).
-      patientGLTF: wardModels.patient,
-      clinicianGLTF: window.__LOW_GPU ? null : wardModels.clinician,
+      patientGLTF: SAFE_MODE ? null : wardModels.patient,
+      clinicianGLTF: (SAFE_MODE || window.__LOW_GPU) ? null : wardModels.clinician,
       patientTransform: WARD_PATIENT_T, clinicianTransform: WARD_CLINICIAN_T,
       clinicianIdleClip: WARD_IDLE_CLIP
     });
@@ -4416,7 +4423,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       try { if (window.makeWardProps) wardProps = window.makeWardProps(THREE, scene, { patientArmWorld: { x: 0.05, y: 0.72, z: -1.5 } }); } catch (e) {}
       try { if (window.makeWardFX)    wardFx    = window.makeWardFX(THREE, scene, {}); } catch (e) {}
     }
-    try { if (window.WardAudio)     { window.WardAudio.start(); if (latestVitals) window.WardAudio.setVitals(latestVitals); } } catch (e) {}
+    try { if (!SAFE_MODE && window.WardAudio) { window.WardAudio.start(); if (latestVitals) window.WardAudio.setVitals(latestVitals); } } catch (e) {}
     // We drive the camera via the rig only; reset any framing the ward applied,
     // then place the rig at a bedside establishing view.
     camera.position.set(0, 0, 0);
@@ -4427,11 +4434,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     // Interaction layer: in-world menus + touchable patient + props.
     try {
-      if (typeof window.makeVRUI === 'function') {
+      if (!SAFE_MODE && typeof window.makeVRUI === 'function') {
         vrui = window.makeVRUI(THREE, scene, { renderer: renderer, camera: camera, rig: rig,
           bounds: { minX: -2.2, maxX: 2.2, minZ: -2.0, maxZ: 4.2 } });
       }
-      if (typeof window.makePatientInteract === 'function' && scn && scn.touchZones) {
+      if (!SAFE_MODE && typeof window.makePatientInteract === 'function' && scn && scn.touchZones) {
         pInteract = window.makePatientInteract(THREE, scene, {
           renderer: renderer, camera: camera, rig: rig, vrui: vrui,
           zones: scn.touchZones,
@@ -4491,7 +4498,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const cine = window.Cinematic;
     if (cine) cine.fadeOut(0);            // hard-cut to black so the scene swap is hidden
     mountWard(e.detail && e.detail.scenario);  // room first; monitor anchors to its bedside
-    if (!vitalsMon && typeof window.makeVitalsMonitor === 'function') {
+    if (!SAFE_MODE && !vitalsMon && typeof window.makeVitalsMonitor === 'function') {
       let pos = { x: 1.55, y: 1.5, z: -0.4 };
       if (ward && ward.bedsideAnchor) { const a = ward.bedsideAnchor(); pos = { x: a.x, y: a.y, z: a.z }; }
       vitalsMon = window.makeVitalsMonitor(THREE, scene, { position: pos, normalRanges: nr, faceTarget: camera });
@@ -4638,7 +4645,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   renderer.setAnimationLoop((t) => {
     const presenting = renderer.xr.isPresenting;
     if (!presenting) { if (document.hidden) return; if (t - flatLast < 33) return; flatLast = t; }
-    if (wardWarming) return;   // ward shaders still compiling — see mountWard
+    if (wardWarming) {
+      // Ward shaders still compiling (see mountWard). CRITICAL: keep
+      // submitting frames — in XR the Quest OS kills the browser if frame
+      // submission stops for a couple of seconds, so render a cheap empty
+      // scene instead of skipping the render.
+      if (!warmScene) { warmScene = new THREE.Scene(); warmScene.background = new THREE.Color(0x000000); }
+      renderer.render(warmScene, camera);
+      return;
+    }
     try {
     const now = (t - t0) / 1000;
 
