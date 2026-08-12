@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b19');   // build marker: proves which deploy a run used
+  window.__crumb('boot b20');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4492,7 +4492,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   //  start/turn/end. The holographic hub (panels/grid) is the lobby and is
   //  hidden while a scenario's 3D room is mounted, then restored on exit.
   let vitalsMon = null, latestVitals = null;
-  let ward = null, savedView = null, wardProps = null, wardFx = null, wardGrade = null, wardDecor = null;
+  let ward = null, savedView = null, wardProps = null, wardFx = null, wardGrade = null, wardDecor = null, medProps = null;
   const wardModels = { patient: null, clinician: null, loading: false, loaded: false };
 
   // Model placement (from asset recon): Fitness Character supine on the bed,
@@ -4623,6 +4623,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (!SAFE_MODE) {
       try { if (window.makeWardProps) wardProps = window.makeWardProps(THREE, scene, { patientArmWorld: { x: 0.05, y: 0.72, z: -1.5 } }); } catch (e) {}
       try { if (window.makeWardDecor) wardDecor = window.makeWardDecor(THREE, scene, {}); } catch (e) {}
+      try { if (window.makeMedProps) medProps = window.makeMedProps(THREE, scene, {}); } catch (e) {}
       try { if (window.makeWardFX)    wardFx    = window.makeWardFX(THREE, scene, {}); } catch (e) {}
     }
     try { if (!SAFE_MODE && window.WardAudio) { window.WardAudio.start(); if (latestVitals) window.WardAudio.setVitals(latestVitals); } } catch (e) {}
@@ -4661,6 +4662,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (wardFx)    { try { wardFx.dispose(); }    catch (e) {} wardFx = null; }
     if (wardProps) { try { wardProps.dispose(); } catch (e) {} wardProps = null; }
     if (wardDecor) { try { wardDecor.dispose(); } catch (e) {} wardDecor = null; }
+    if (medProps)  { try { medProps.dispose(); }  catch (e) {} medProps = null; }
     if (wardGrade) { try { wardGrade.dispose(); } catch (e) {} wardGrade = null; }
     if (pInteract) { try { pInteract.dispose(); } catch (e) {} pInteract = null; }
     if (vrui)      { try { vrui.dispose(); }      catch (e) {} vrui = null; }
@@ -4851,6 +4853,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (heartViz) heartViz.show();
   });
   window.addEventListener('sim-heart-hide', function () { if (heartViz) heartViz.hide(); });
+  window.addEventListener('sim-med', function (e) {
+    if (!medProps || !e.detail) return;
+    try {
+      if (e.detail.stage === 'give') medProps.give(e.detail.id);
+      else if (medProps.spawn(e.detail.id)) window.__crumb('med:' + e.detail.id);
+    } catch (err) {}
+  });
   window.addEventListener('sim-heart-state', function (e) {
     if (heartViz && e.detail) heartViz.setState(e.detail);
   });
@@ -5000,6 +5009,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (handViz && presenting) handViz.update();
     if (presenting && vrui) updateTouch();
     if (heartViz) heartViz.update(dt, now);
+    if (medProps) medProps.update(dt, now);
     updateActionFlashes(dt);
     if (ward && latestVitals) ward.update(latestVitals, dt);
     if (wardFx) wardFx.update(dt, now);
@@ -5027,7 +5037,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 19 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 20 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7150,6 +7160,7 @@ if (typeof window !== 'undefined') {
   var cprOn = false, nudgesFired = {};
   function visualsFor(text) {
     var t = String(text || '').toLowerCase();
+    medVisuals(t);
     if (/\b(cpr|compress)/.test(t)) { cprOn = true; emit('sim-prop', { prop: 'cpr', on: true }); emit('sim-cpr-view', { on: true }); }
     if (/\b(defib|shock|joule|charge)/.test(t)) {
       if (cprOn) { cprOn = false; emit('sim-prop', { prop: 'cpr', on: false }); emit('sim-cpr-view', { on: false }); }
@@ -7240,6 +7251,10 @@ if (typeof window !== 'undefined') {
                 emit('sim-heart-hide', {});
               } else if (matchesIntervention(t)) {
                 submitVoiceOrder(String(text || ''), 'speech');
+              } else {
+                // Naming a drug without a full order still reaches for it —
+                // the item appears on the tray, ready to be given.
+                medVisuals(t);
               }
               return;
             }
@@ -7341,6 +7356,38 @@ if (typeof window !== 'undefined') {
     emit('sim-heart-state', { mode: mode, hr: Math.max(v.hr, mode === 'vf' ? 0 : v.hr),
       contractility: Math.max(0, Math.min(1, v.sbp / 130)) });
   }
+  // ---- medications as objects -------------------------------------------
+  // Naming a drug makes it appear on the prep tray; ordering it sends it to
+  // the patient. Both stages are driven off the raw utterance so the trainee
+  // sees the drug the moment they say it, exactly like reaching for it.
+  var MED_WORDS = [
+    ['epinephrine',      /\b(epinephrine|adrenaline|epi)\b/],
+    ['epi-autoinjector', /\b(epipen|auto-?injector)\b/],
+    ['aspirin',          /\b(aspirin|asa)\b/],
+    ['nitroglycerin',    /\b(nitro(glycerin|glycerine)?|gtn)\b/],
+    ['morphine',         /\bmorphine\b/],
+    ['amiodarone',       /\b(amiodarone|cordarone)\b/],
+    ['antihistamine',    /\b(antihistamine|diphenhydramine|benadryl|cetirizine)\b/],
+    ['corticosteroid',   /\b(hydrocortisone|corticosteroid|steroid|methylprednisolone)\b/],
+    ['fluids',           /\b(fluids?|crystalloid|saline bolus|ringer)\b/],
+    ['salbutamol',       /\b(salbutamol|albuterol|nebuli[sz]e)/]
+  ];
+  var GIVE_VERB = /\b(give|giving|administer|administering|push|pushing|inject|injecting|draw|drawing|chew|spray|deliver|hang|start)\b/;
+  function medVisuals(text) {
+    var t = String(text || '').toLowerCase();
+    for (var i = 0; i < MED_WORDS.length; i++) {
+      if (!MED_WORDS[i][1].test(t)) continue;
+      var id = MED_WORDS[i][0];
+      emit('sim-med', { id: id, stage: 'spawn' });
+      if (GIVE_VERB.test(t)) {
+        // Let the item be seen before it flies to the patient.
+        setTimeout(function (mid) { return function () { emit('sim-med', { id: mid, stage: 'give' }); }; }(id), 1300);
+      }
+      return true;
+    }
+    return false;
+  }
+
   // ---- voice orders ------------------------------------------------------
   // Does this utterance name one of the scenario's own interventions? Same
   // alias data the engine matches on, so anything the engine can act upon is
@@ -15526,6 +15573,198 @@ window.MI_SCENARIO = MI_SCENARIO;
     };
     setState(state);
     return hv;
+  };
+})();
+
+</script>
+<script>
+/* =====================================================================
+   med-props.js — physical medications that appear and are given
+   ---------------------------------------------------------------------
+   The sim used to acknowledge a drug order with a text bubble, which read
+   as nothing happening. Here every medication the scenarios can order is a
+   real object: naming it makes the item appear on a prep tray beside the
+   bed (scale-in, hover, slow spin, labelled); ordering it flies the item to
+   the correct site on the patient, flashes, and clears.
+
+   All geometry is procedural and shares one material per colour, so the
+   whole kit is a handful of draw calls with no external assets. Labels are
+   256x64 canvases.
+
+   window.makeMedProps(THREE, scene, opts) -> {
+     spawn(medId), give(medId), has(medId), update(dt, now), dispose()
+   }
+   opts.tray   {x,y,z} where items appear (default: right of the bed)
+   opts.sites  { thigh|arm|mouth|chest: {x,y,z} } delivery targets
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  // id -> presentation. `type` picks the geometry, `site` the delivery target.
+  var MEDS = {
+    'epinephrine':      { label: 'EPINEPHRINE 1 mg/mL', type: 'syringe',      color: 0xf2c14e, site: 'thigh' },
+    'epi-autoinjector': { label: 'EPINEPHRINE AUTO-INJECTOR', type: 'autoinjector', color: 0xe06c3a, site: 'thigh' },
+    'aspirin':          { label: 'ASPIRIN 325 mg', type: 'tablet',       color: 0xf4f1e6, site: 'mouth' },
+    'nitroglycerin':    { label: 'NITROGLYCERIN SL', type: 'spray',      color: 0xc0392b, site: 'mouth' },
+    'morphine':         { label: 'MORPHINE 2-4 mg IV', type: 'vial',     color: 0x9b8ec4, site: 'arm' },
+    'amiodarone':       { label: 'AMIODARONE 300 mg', type: 'vial',      color: 0x4e9bd6, site: 'arm' },
+    'antihistamine':    { label: 'ANTIHISTAMINE IV', type: 'vial',       color: 0x77c48b, site: 'arm' },
+    'corticosteroid':   { label: 'HYDROCORTISONE IV', type: 'vial',      color: 0xd98cc4, site: 'arm' },
+    'fluids':           { label: 'CRYSTALLOID 500 mL', type: 'ivbag',    color: 0xbfe3f2, site: 'arm' },
+    'salbutamol':       { label: 'SALBUTAMOL NEB', type: 'vial',         color: 0x6fd3c7, site: 'mouth' }
+  };
+
+  window.makeMedProps = function (THREE, scene, opts) {
+    opts = opts || {};
+    var TRAY = opts.tray || { x: 0.62, y: 1.06, z: -1.35 };
+    var SITES = opts.sites || {
+      thigh: { x: -0.30, y: 0.80, z: -0.95 },
+      arm:   { x: 0.05,  y: 0.78, z: -1.50 },
+      mouth: { x: -0.40, y: 0.94, z: -2.05 },
+      chest: { x: -0.40, y: 0.92, z: -1.75 }
+    };
+
+    var group = new THREE.Group();
+    scene.add(group);
+    var geos = [], mats = [], texs = [];
+    function G(g) { geos.push(g); return g; }
+    function M(m) { mats.push(m); return m; }
+    function T(t) { texs.push(t); return t; }
+
+    var items = {};      // id -> { obj, state, t, from, to, label }
+    var slot = 0;        // tray slots so two items never overlap
+
+    function labelSprite(text, color) {
+      var c = document.createElement('canvas'); c.width = 256; c.height = 64;
+      var x = c.getContext('2d');
+      x.fillStyle = 'rgba(3,16,24,0.82)'; x.fillRect(0, 12, 256, 40);
+      x.strokeStyle = '#00e5ff'; x.lineWidth = 2; x.strokeRect(1, 13, 254, 38);
+      x.fillStyle = '#dff6ff'; x.font = '600 19px "Segoe UI",sans-serif';
+      x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(String(text).slice(0, 26), 128, 33);
+      var tex = T(new THREE.CanvasTexture(c));
+      tex.colorSpace = THREE.SRGBColorSpace;
+      var s = new THREE.Sprite(M(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })));
+      s.scale.set(0.26, 0.065, 1);
+      s.position.set(0, 0.10, 0);
+      s.raycast = function () {};
+      return s;
+    }
+
+    // ---- geometry per presentation ------------------------------------
+    function build(def) {
+      var g = new THREE.Group();
+      var body = M(new THREE.MeshStandardMaterial({ color: def.color, roughness: 0.35, metalness: 0.05 }));
+      var glass = M(new THREE.MeshStandardMaterial({ color: 0xdff3ff, roughness: 0.15, metalness: 0.0,
+        transparent: true, opacity: 0.55 }));
+      var steel = M(new THREE.MeshStandardMaterial({ color: 0xcdd6dd, roughness: 0.3, metalness: 0.8 }));
+      if (def.type === 'syringe') {
+        var barrel = new THREE.Mesh(G(new THREE.CylinderGeometry(0.011, 0.011, 0.085, 12)), glass);
+        barrel.rotation.z = Math.PI / 2; g.add(barrel);
+        var fluid = new THREE.Mesh(G(new THREE.CylinderGeometry(0.0092, 0.0092, 0.05, 12)), body);
+        fluid.rotation.z = Math.PI / 2; fluid.position.x = -0.012; g.add(fluid);
+        var plunger = new THREE.Mesh(G(new THREE.CylinderGeometry(0.008, 0.008, 0.035, 10)), steel);
+        plunger.rotation.z = Math.PI / 2; plunger.position.x = 0.055; g.add(plunger);
+        var needle = new THREE.Mesh(G(new THREE.CylinderGeometry(0.0014, 0.0014, 0.032, 6)), steel);
+        needle.rotation.z = Math.PI / 2; needle.position.x = -0.058; g.add(needle);
+      } else if (def.type === 'autoinjector') {
+        var tube = new THREE.Mesh(G(new THREE.CylinderGeometry(0.016, 0.016, 0.095, 14)), body);
+        tube.rotation.z = Math.PI / 2; g.add(tube);
+        var cap = new THREE.Mesh(G(new THREE.CylinderGeometry(0.017, 0.017, 0.018, 14)), steel);
+        cap.rotation.z = Math.PI / 2; cap.position.x = -0.056; g.add(cap);
+      } else if (def.type === 'tablet') {
+        for (var i = 0; i < 2; i++) {
+          var t = new THREE.Mesh(G(new THREE.CylinderGeometry(0.014, 0.014, 0.006, 16)), body);
+          t.position.set(i * 0.02 - 0.01, i * 0.004, 0); g.add(t);
+        }
+      } else if (def.type === 'spray') {
+        var btl = new THREE.Mesh(G(new THREE.CylinderGeometry(0.016, 0.018, 0.06, 14)), body);
+        g.add(btl);
+        var noz = new THREE.Mesh(G(new THREE.CylinderGeometry(0.006, 0.006, 0.022, 10)), steel);
+        noz.position.y = 0.04; g.add(noz);
+      } else if (def.type === 'ivbag') {
+        var bag = new THREE.Mesh(G(new THREE.BoxGeometry(0.10, 0.14, 0.03)), glass);
+        g.add(bag);
+        var lvl = new THREE.Mesh(G(new THREE.BoxGeometry(0.092, 0.10, 0.022)), body);
+        lvl.position.y = -0.015; g.add(lvl);
+      } else {                      // vial
+        var v = new THREE.Mesh(G(new THREE.CylinderGeometry(0.014, 0.014, 0.052, 14)), glass);
+        g.add(v);
+        var fl = new THREE.Mesh(G(new THREE.CylinderGeometry(0.0125, 0.0125, 0.032, 14)), body);
+        fl.position.y = -0.008; g.add(fl);
+        var lid = new THREE.Mesh(G(new THREE.CylinderGeometry(0.0092, 0.0092, 0.012, 12)), steel);
+        lid.position.y = 0.031; g.add(lid);
+      }
+      return g;
+    }
+
+    function spawn(id) {
+      var def = MEDS[id];
+      if (!def || items[id]) return false;
+      var obj = new THREE.Group();
+      obj.add(build(def));
+      obj.add(labelSprite(def.label, def.color));
+      var lane = (slot++ % 4);
+      obj.position.set(TRAY.x + lane * 0.14, TRAY.y, TRAY.z);
+      obj.scale.setScalar(0.001);
+      group.add(obj);
+      items[id] = { obj: obj, def: def, state: 'appear', t: 0,
+                    home: obj.position.clone(), from: null, to: null };
+      return true;
+    }
+
+    function give(id) {
+      var it = items[id];
+      if (!it || it.state === 'giving' || it.state === 'done') return false;
+      var s = SITES[it.def.site] || SITES.arm;
+      it.from = it.obj.position.clone();
+      it.to = new THREE.Vector3(s.x, s.y, s.z);
+      it.state = 'giving'; it.t = 0;
+      return true;
+    }
+
+    function update(dt, now) {
+      for (var id in items) {
+        var it = items[id];
+        it.t += dt;
+        if (it.state === 'appear') {
+          // Deliberately unhurried: the trainee should SEE the drug arrive.
+          var k = Math.min(1, it.t / 0.9);
+          var e = 1 - Math.pow(1 - k, 3);
+          it.obj.scale.setScalar(e);
+          if (k >= 1) { it.state = 'idle'; it.t = 0; }
+        } else if (it.state === 'idle') {
+          it.obj.position.y = it.home.y + Math.sin(now * 1.6) * 0.012;
+          it.obj.rotation.y += dt * 0.6;
+        } else if (it.state === 'giving') {
+          var k2 = Math.min(1, it.t / 1.1);
+          var e2 = k2 * k2 * (3 - 2 * k2);            // smoothstep
+          it.obj.position.lerpVectors(it.from, it.to, e2);
+          it.obj.position.y += Math.sin(e2 * Math.PI) * 0.16;   // arc over the bed
+          it.obj.rotation.y += dt * 2.2;
+          if (k2 >= 1) { it.state = 'fade'; it.t = 0; }
+        } else if (it.state === 'fade') {
+          var k3 = Math.min(1, it.t / 0.45);
+          it.obj.scale.setScalar(Math.max(0.001, 1 - k3));
+          if (k3 >= 1) {
+            it.state = 'done';
+            group.remove(it.obj);
+            delete items[id];
+          }
+        }
+      }
+    }
+
+    function dispose() {
+      scene.remove(group);
+      geos.forEach(function (g) { try { g.dispose(); } catch (e) {} });
+      mats.forEach(function (m) { try { m.dispose(); } catch (e) {} });
+      texs.forEach(function (t) { try { t.dispose(); } catch (e) {} });
+      geos = []; mats = []; texs = []; items = {};
+    }
+
+    return { spawn: spawn, give: give, has: function (id) { return !!items[id]; },
+             update: update, dispose: dispose, MEDS: MEDS };
   };
 })();
 
