@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b24');   // build marker: proves which deploy a run used
+  window.__crumb('boot b25');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4892,6 +4892,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   window.addEventListener('sim-vitals-update', function (e) {
     if (!e.detail) return;
     latestVitals = e.detail.vitals || latestVitals;
+    if (vitalsMon && vitalsMon.setRhythm) vitalsMon.setRhythm(e.detail.rhythm);
     if (vitalsMon && vitalsMon.setAlarm) vitalsMon.setAlarm(!!e.detail.critical);
     if (ward && ward.setCritical) ward.setCritical(!!e.detail.critical);
     if (window.WardAudio) {
@@ -5040,7 +5041,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 24 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 25 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -6015,6 +6016,11 @@ if (typeof window !== 'undefined') {
         gameState.vitals = clampVitals(applyVitalChanges(gameState.vitals, st));
         if (st.dialogue || st.patientDialogue) dialogue = st.dialogue || st.patientDialogue;
         if (st.cues || st.visibleCues) cues = st.cues || st.visibleCues;
+        // Keyframes may name the rhythm ('vf-coarse'|'vf-fine'|'asystole'|
+        // 'sinus'). Vitals alone cannot express it — an arrested patient is
+        // hr 0 whether they are fibrillating (shock them) or asystolic (do
+        // not), and the monitor drew a flatline for both.
+        if (st.rhythm) gameState.rhythm = st.rhythm;
         if (st.critical === true || st.arrest === true) critical = true;
       } else {
         exhausted = false;
@@ -6817,17 +6823,34 @@ if (typeof window !== 'undefined') {
            + g(0.55, 0.045, 0.24);  // T
     }
 
-    function stepEcg(dt, hr) {
+    // Ventricular fibrillation: no organised complex at all, just a coarse
+    // chaotic baseline. Three incommensurate sines never repeat, so the trace
+    // wanders the way real VF does. Coarse VF is tall and ragged; after a few
+    // minutes of arrest it decays to fine VF, which is the clinical warning
+    // that the window is closing. Pure arithmetic inside the existing sample
+    // loop — no allocation, this runs on the per-frame texture path.
+    function vfSample(t, fine) {
+      var a = fine ? 0.10 : 0.34;
+      return a * (Math.sin(t * 34.6) + 0.7 * Math.sin(t * 45.9 + 1.3)
+                + 0.5 * Math.sin(t * 57.2 + 2.7)) / 2.2;
+    }
+    var ecgClock = 0, curRhythm = null;
+    function stepEcg(dt, hr, rhythm) {
       if (!(hr > 0)) hr = 0; // flatline if no HR
       sampleAcc += dt * SAMPLES_PER_SEC;
       var n = sampleAcc | 0;
       if (n > N_SAMPLES) n = N_SAMPLES; // don't spiral after a long pause
       sampleAcc -= n;
       var phasePerSample = (hr / 60) / SAMPLES_PER_SEC; // beats advance with HR
+      var dtPerSample = 1 / SAMPLES_PER_SEC;
+      var isVf = (rhythm === 'vf-coarse' || rhythm === 'vf-fine');
+      var fine = (rhythm === 'vf-fine');
       for (var i = 0; i < n; i++) {
+        ecgClock += dtPerSample;
         beatPhase += phasePerSample;
         if (beatPhase >= 1) beatPhase -= 1;
-        samples[writeIdx] = hr > 0 ? pqrst(beatPhase) : 0;
+        samples[writeIdx] = isVf ? vfSample(ecgClock, fine)
+                          : (hr > 0 ? pqrst(beatPhase) : 0);
         writeIdx = (writeIdx + 1) % N_SAMPLES;
       }
     }
@@ -6951,7 +6974,7 @@ if (typeof window !== 'undefined') {
         }
 
         // ---- ECG: per-frame scroll on its OWN small texture
-        stepEcg(dt, vitals.hr);
+        stepEcg(dt, vitals.hr, curRhythm);
         drawEcg(alarm);
 
         // ---- alarm pulse: material opacity only (no texture upload)
@@ -6966,8 +6989,22 @@ if (typeof window !== 'undefined') {
         }
       },
 
+      // The scenario names the rhythm; an arrested patient's vitals cannot
+      // distinguish VF from asystole on their own.
+      setRhythm: function (r) {
+        curRhythm = r || null;
+        // A fibrillating patient is an alarming patient, regardless of the
+        // scenario's `critical` flag (which marks the terminal step only).
+        if (curRhythm === 'vf-coarse' || curRhythm === 'vf-fine' || curRhythm === 'asystole') {
+          if (!alarm) { alarm = true; lastKey = ''; }
+        }
+      },
+
       setAlarm: function (on) {
         on = !!on;
+        // An arrest rhythm always alarms, even before the scenario's terminal
+        // `critical` step — otherwise this call would silence VF.
+        if (!on && (curRhythm === 'vf-coarse' || curRhythm === 'vf-fine' || curRhythm === 'asystole')) return;
         if (on === alarm) return;
         alarm = on;
         lastKey = ''; // force a numbers redraw so the border recolors
@@ -7404,7 +7441,14 @@ if (typeof window !== 'undefined') {
     if (!st || !st.vitals) return;
     var v = st.vitals, mode;
     var arrested = (v.hr <= 30 || v.sbp <= 40);
-    if (arrested) mode = cprOn ? 'cpr' : (v.hr <= 5 ? 'asystole' : 'vf');
+    // Trust the scenario's declared rhythm. Inferring from hr made every
+    // arrest look asystolic (hr 0), so the VF shiver never rendered and the
+    // attending said "that's a shockable rhythm" over a still grey heart.
+    if (arrested) {
+      mode = cprOn ? 'cpr'
+           : (st.rhythm === 'asystole' ? 'asystole'
+           : (st.rhythm ? 'vf' : (v.hr <= 5 ? 'asystole' : 'vf')));
+    }
     else if (st.trajectory === 'treated') mode = 'rosc';
     else if (SCN && (SCN.id === 'emerg' || SCN.id === 'cardiac') && (v.sbp < 118 || st.timeElapsedSeconds > 60)) mode = 'ischemia';
     else mode = 'baseline';
@@ -7618,7 +7662,8 @@ if (typeof window !== 'undefined') {
       if (cueChanged) appendLog('cue', 'You observe: ' + st.visibleCues.join(', ') + '.');
     }
     if (cueKey) lastCueKey = cueKey;
-    if (st.vitals) emit('sim-vitals-update', { vitals: st.vitals, critical: !!st.critical });
+    if (st.vitals) emit('sim-vitals-update', { vitals: st.vitals, critical: !!st.critical,
+      rhythm: st.rhythm || null });
     // Scenario end is driven solely by the loop's onEnd -> finish(); never here.
   }
 
@@ -13851,16 +13896,16 @@ const MI_SCENARIO = {
         cues: ['Frequent PVCs, now in couplets and a short run of VT; BP sliding DOWN (now 30 mmHg below her baseline — nitrate window has closed, ACC/AHA 2013); says "I think I\'m going to die".'],
         dialogue: '"My chest... I can\'t... it\'s crushing me..."' },
       // ----- ARREST: primary VF. critical:false — the sim MUST keep running.
-      { atSeconds: 200, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 90, rr: 0 },
+      { atSeconds: 200, rhythm: 'vf-coarse', vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 90, rr: 0 },
         cues: ['Eyes roll back; slumps mid-sentence, unresponsive; no carotid pulse; agonal gasp then apnoea. Monitor: coarse VENTRICULAR FIBRILLATION.'],
         dialogue: 'The patient is unresponsive with no palpable pulse. The monitor shows coarse VF.',
         critical: false },
-      { atSeconds: 260, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 78, rr: 0 },
+      { atSeconds: 260, rhythm: 'vf-coarse', vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 78, rr: 0 },
         cues: ['One minute of no-flow: central cyanosis spreading; pupils sluggish; VF still coarse — still highly shockable (AHA 2020: shock success falls with every minute of delay).'] },
-      { atSeconds: 380, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 60, rr: 0 },
+      { atSeconds: 380, rhythm: 'vf-fine', vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 60, rr: 0 },
         cues: ['Three minutes of no-flow: VF amplitude decaying from coarse toward fine; mottling of the face and chest.'] },
       // Terminal state if the trainee never resuscitates — critical:true.
-      { atSeconds: 500, vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 40, rr: 0 },
+      { atSeconds: 500, rhythm: 'asystole', vitals: { hr: 0, sbp: 0, dbp: 0, spo2: 40, rr: 0 },
         cues: ['Fine VF degenerates to ASYSTOLE. Five minutes with no CPR and no shock — this is no longer survivable.'],
         dialogue: 'Flatline. The resuscitation window has closed.',
         critical: true }
@@ -13871,7 +13916,7 @@ const MI_SCENARIO = {
     // sinus tachycardia and post-arrest hypotension, oxygenation titrated to
     // SpO2 92-98%, SBP supported >90 mmHg.
     treated: [
-      { atSeconds: 15,  vitals: { hr: 128, sbp: 78, dbp: 48, spo2: 84, rr: 4 },
+      { atSeconds: 15,  rhythm: 'sinus', vitals: { hr: 128, sbp: 78, dbp: 48, spo2: 84, rr: 4 },
         cues: ['Rhythm check: organized narrow-complex rhythm; faint carotid pulse — ROSC. Post-arrest hypotension; breaths agonal, assist ventilation.'] },
       { atSeconds: 60,  vitals: { hr: 112, sbp: 94, dbp: 58, spo2: 91, rr: 10 },
         cues: ['Colour returning; spontaneous breaths resuming; groans to voice. Titrate O2 toward SpO2 92-98% (AHA 2020 post-ROSC).'] },
