@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b26');   // build marker: proves which deploy a run used
+  window.__crumb('boot b27');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4351,6 +4351,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     fingertip.position.set(-0.009, -0.055, -0.105);
     glove.add(fingertip);
     rec.fingertip = fingertip;
+    const paddle = makePaddle(THREE);
+    grip.add(paddle);
+    rec.paddle = paddle;
     rec.line = line;
     ctrl.addEventListener('connected', e => {
       const isHand = !!(e.data && e.data.hand);
@@ -4366,6 +4369,58 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     rig.add(hand);
     inputs.push(rec);
   }
+
+  // ---- defibrillator paddles you actually hold --------------------------
+  // Saying "charge the defib" puts paddles in both hands; saying "clear"
+  // discharges them. Ordering a shock from across the room never felt like
+  // resuscitating anyone — this is the one procedure in the case that should
+  // be in the trainee's hands.
+  let paddlesOut = false, paddleTimer = null;
+  function makePaddle(THREE) {
+    const g = new THREE.Group();
+    const shell = new THREE.MeshStandardMaterial({ color: 0x1d232a, roughness: 0.55 });
+    const metal = new THREE.MeshStandardMaterial({ color: 0xb9c2c9, roughness: 0.3, metalness: 0.75 });
+    const live = new THREE.MeshBasicMaterial({ color: 0xff8a3d, transparent: true, opacity: 0.0 });
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.021, 0.024, 0.10, 12), shell);
+    grip.rotation.x = -0.35; g.add(grip);
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.07, 10), shell);
+    neck.position.set(0, -0.02, -0.055); neck.rotation.x = 1.25; g.add(neck);
+    const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.048, 0.016, 20), metal);
+    disc.position.set(0, -0.04, -0.10); disc.rotation.x = 1.57; g.add(disc);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.049, 0.006, 8, 22), live);
+    ring.position.copy(disc.position); ring.rotation.x = 1.57; g.add(ring);
+    g.userData.ring = ring.material;
+    g.visible = false;
+    return g;
+  }
+  function setPaddles(on) {
+    paddlesOut = !!on;
+    inputs.forEach(r => { if (r.paddle) r.paddle.visible = paddlesOut && !r.isHandInput; });
+    if (paddlesOut) {
+      window.__crumb('paddles-out');
+      window.dispatchEvent(new CustomEvent('sim-hud',
+        { detail: { text: '⚡ PADDLES CHARGED — SAY "CLEAR" TO SHOCK', transient: true } }));
+    }
+  }
+  function firePaddles() {
+    if (!paddlesOut) return false;
+    inputs.forEach(r => {
+      if (r.paddle && r.paddle.userData.ring) r.paddle.userData.ring.opacity = 0.95;
+    });
+    window.__crumb('paddles-fired');
+    if (paddleTimer) clearTimeout(paddleTimer);
+    paddleTimer = setTimeout(() => {
+      inputs.forEach(r => {
+        if (r.paddle && r.paddle.userData.ring) r.paddle.userData.ring.opacity = 0;
+      });
+      setPaddles(false);
+    }, 900);
+    return true;
+  }
+  window.addEventListener('sim-paddles', function (e) {
+    if (!e.detail) return;
+    if (e.detail.fire) firePaddles(); else setPaddles(true);
+  });
 
   // Nitrile-gloved hand, procedural: palm + thumb + 4 two-segment fingers,
   // curled as if holding a controller, plus a cuff at the wrist. One shared
@@ -5048,7 +5103,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 26 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 27 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7264,6 +7319,10 @@ if (typeof window !== 'undefined') {
     var t = String(text || '').toLowerCase();
     medVisuals(t);
     if (/\b(cpr|compress)/.test(t)) { cprOn = true; emit('sim-prop', { prop: 'cpr', on: true }); emit('sim-cpr-view', { on: true }); }
+    // Paddles first: charging puts them in the trainee's hands, and "clear"
+    // is what actually discharges them — the callout is part of the skill.
+    if (/\b(defib|paddle|charge|pads?)\b/.test(t)) emit('sim-paddles', { fire: false });
+    if (/\b(clear|shocking|shock her|deliver)\b/.test(t)) emit('sim-paddles', { fire: true });
     if (/\b(defib|shock|joule|charge)/.test(t)) {
       if (cprOn) { cprOn = false; emit('sim-prop', { prop: 'cpr', on: false }); emit('sim-cpr-view', { on: false }); }
       emit('sim-prop', { prop: 'shock' });
@@ -7309,7 +7368,7 @@ if (typeof window !== 'undefined') {
 
   function beginCase() {
     started = true; reported = false;
-    cprOn = false; nudgesFired = {};
+    cprOn = false; nudgesFired = {}; arrestAnnounced = false; lastCueKey = '';
     // Charge-nurse SBAR handoff, spoken aloud (pre-generated TTS asset — the
     // handoffScript text verbatim, in a third voice distinct from the patient
     // and the doctor). This is the in-headset replacement for the DOM brief,
@@ -7568,7 +7627,7 @@ if (typeof window !== 'undefined') {
   // several times per tick — she never shuts up and the texture churn is a
   // memory problem on a headset. renderTurn checks `autoTick` and only speaks
   // when something actually changed (new cue, arrest, recovery).
-  var liveTimer = null, autoTick = false, lastCueKey = '';
+  var liveTimer = null, autoTick = false, lastCueKey = '', arrestAnnounced = false;
   var LIVE_TICK_MS = 10000, LIVE_TICK_SECONDS = 10;
   function startLiveClock() {
     stopLiveClock();
@@ -7677,6 +7736,18 @@ if (typeof window !== 'undefined') {
     if (cueKey) lastCueKey = cueKey;
     if (st.vitals) emit('sim-vitals-update', { vitals: st.vitals, critical: !!st.critical,
       rhythm: st.rhythm || null });
+    // An arrested patient stops talking, which reads as a broken voice agent
+    // unless the sim says plainly what happened.
+    var arrestedNow = st.vitals && (st.vitals.hr <= 30 || st.vitals.sbp <= 40);
+    if (arrestedNow && !arrestAnnounced) {
+      arrestAnnounced = true;
+      var rhy = (st.rhythm === 'asystole') ? 'ASYSTOLE' : 'VF';
+      setChip('PATIENT UNRESPONSIVE — ' + rhy, AMBER);
+      appendLog('cue', 'She is unresponsive and pulseless. The monitor shows ' +
+        (rhy === 'VF' ? 'ventricular fibrillation — a shockable rhythm.' : 'asystole.'));
+    } else if (!arrestedNow && arrestAnnounced) {
+      arrestAnnounced = false;
+    }
     // Scenario end is driven solely by the loop's onEnd -> finish(); never here.
   }
 
@@ -7699,6 +7770,7 @@ if (typeof window !== 'undefined') {
 
   function setChip(txt, color) {
     hudChip = String(txt || ''); emitHud();
+    // (arrest state overrides this on the HUD — see renderTurn)
     if (!statusChip) return; statusChip.textContent = txt; statusChip.style.color = color;
     statusChip.style.background = (color === AMBER ? 'rgba(255,176,32,0.15)' : 'rgba(0,229,255,0.15)');
   }
@@ -8210,6 +8282,26 @@ if (typeof window !== 'undefined') {
     blanket.position.set(0, MATTRESS_TOP + 0.02, splitZ + flatLen - 0.86);
     blanket.castShadow = true; blanket.receiveShadow = true;
     bed.add(blanket);
+
+    // Scrub trousers. The gowned patient model is a single pre-posed mesh
+    // with no rig, so her legs cannot be closed and the gown hem gapes when
+    // viewed from the foot of the bed. Real wards put a patient in trousers
+    // or cover them; this does both, and it is a dignity issue before it is
+    // a rendering one. Sits between the body and the blanket.
+    (function trousers() {
+      const cloth = std({ color: 0x4e7f96, roughness: 0.92, metalness: 0.0 });
+      const hipGeo = G(new THREE.BoxGeometry(0.40, 0.20, 0.30));
+      const hips = new THREE.Mesh(hipGeo, cloth);
+      hips.position.set(BED_X, MATTRESS_TOP + 0.10, -1.12);
+      group.add(hips);
+      const legGeo = G(new THREE.CylinderGeometry(0.105, 0.082, 0.72, 12));
+      legGeo.rotateX(Math.PI / 2);
+      [-0.085, 0.085].forEach(function (dx) {
+        const leg = new THREE.Mesh(legGeo, cloth);
+        leg.position.set(BED_X + dx, MATTRESS_TOP + 0.09, -0.70);
+        group.add(leg);
+      });
+    })();
 
     // Side rails (thin metal): two horizontal bars + verticals per side
     const railBarGeo = G(new THREE.CylinderGeometry(0.015, 0.015, 1.0, 8));
@@ -15706,7 +15798,10 @@ window.MI_SCENARIO = MI_SCENARIO;
           [inflow, ra, tv || ra.clone().lerp(rv, 0.5), rv, pv || rv, outflow]), 0x3fa9f5);
         flowRed = makeStream(new THREE.CatmullRomCurve3(
           [lungRet, la, mv || la.clone().lerp(lv, 0.5), lv, av || lv, aorta]), 0xff4a4a);
-        setFlowVisible(false);
+        // Flow runs whenever the heart is on screen: the trainee should see
+      // circulation stop in VF and restart under compressions without having
+      // to discover a tap first.
+      setFlowVisible(true);
       } catch (e) {}
     }
     function setFlowVisible(on) {
@@ -15790,8 +15885,7 @@ window.MI_SCENARIO = MI_SCENARIO;
     }
     function clearInspect() {
       hlIndex = -1;
-      if (labelSprite) labelSprite.visible = false;
-      setFlowVisible(false);
+      if (labelSprite) labelSprite.visible = false;   // flow stays on — it is the physiology readout
     }
 
     // ---- beat + mode animation ---------------------------------------
@@ -16577,7 +16671,12 @@ window.MI_SCENARIO = MI_SCENARIO;
 
   window.makeMedProps = function (THREE, scene, opts) {
     opts = opts || {};
-    var TRAY = opts.tray || { x: 0.62, y: 1.06, z: -1.35 };
+    // Items must appear in OPEN SPACE between the trainee and the bed. The
+    // old tray sat level with the mattress beside the patient, where the bed,
+    // the rails and her own body hid everything that spawned — the trainee
+    // gave orders and saw nothing happen. Chest height, clear of the bed
+    // footprint (bed spans x -0.88..0.08, z -2.35..-0.25).
+    var TRAY = opts.tray || { x: 0.58, y: 1.18, z: 0.35 };
     var SITES = opts.sites || {
       thigh: { x: -0.30, y: 0.80, z: -0.95 },
       arm:   { x: 0.05,  y: 0.78, z: -1.50 },
@@ -16619,6 +16718,9 @@ window.MI_SCENARIO = MI_SCENARIO;
       var glass = M(new THREE.MeshStandardMaterial({ color: 0xdff3ff, roughness: 0.15, metalness: 0.0,
         transparent: true, opacity: 0.55 }));
       var steel = M(new THREE.MeshStandardMaterial({ color: 0xcdd6dd, roughness: 0.3, metalness: 0.8 }));
+      // Everything is drawn ~1.6x life size: a real 1 mL ampoule is invisible
+      // at conversational distance in a headset.
+      g.scale.setScalar(1.6);
       if (def.type === 'syringe') {
         var barrel = new THREE.Mesh(G(new THREE.CylinderGeometry(0.011, 0.011, 0.085, 12)), glass);
         barrel.rotation.z = Math.PI / 2; g.add(barrel);
@@ -16666,7 +16768,7 @@ window.MI_SCENARIO = MI_SCENARIO;
       obj.add(build(def));
       obj.add(labelSprite(def.label, def.color));
       var lane = (slot++ % 4);
-      obj.position.set(TRAY.x + lane * 0.14, TRAY.y, TRAY.z);
+      obj.position.set(TRAY.x - lane * 0.17, TRAY.y, TRAY.z);
       obj.scale.setScalar(0.001);
       group.add(obj);
       items[id] = { obj: obj, def: def, state: 'appear', t: 0,
