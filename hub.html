@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b31');   // build marker: proves which deploy a run used
+  window.__crumb('boot b32');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4845,23 +4845,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       title: 'CASE CONTROLS',
       body: 'Right grip: voice on / off',
       buttons: [
-        { label: 'Defib paddles', onSelect: function () {
-            window.dispatchEvent(new CustomEvent('sim-paddles', { detail: { fire: false } }));
-            window.dispatchEvent(new CustomEvent('sim-prop', { detail: { prop: 'defib-pads' } }));
-          } },
-        { label: 'SHOCK — clear!', onSelect: function () {
-            window.dispatchEvent(new CustomEvent('sim-paddles', { detail: { fire: true } }));
-            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'shock at 200 joules because she is in VF' } }));
-          } },
-        { label: 'Epinephrine', onSelect: function () {
-            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'give epinephrine 1 mg IV because she is in cardiac arrest' } }));
-          } },
-        { label: 'Start CPR', onSelect: function () {
-            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'start compressions because she has no pulse' } }));
-          } },
-        { label: 'Oxygen', onSelect: function () {
-            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'give oxygen because her sats are dropping' } }));
-          } },
+        // Clinical actions are VOICE ONLY by design: saying the action and
+        // defending it out loud is the skill being trained. Buttons would let
+        // a trainee treat the patient without ever forming the reasoning.
         { label: 'Wait 30 s', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-wait')); } },
         { label: 'End & debrief', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-end-case')); } },
         { label: 'Close', onSelect: function () { if (vrui) vrui.hidePanel('case'); } }
@@ -5135,7 +5121,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 31 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 32 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7465,9 +7451,28 @@ if (typeof window !== 'undefined') {
               // trainee's. Reaching for equipment should never depend on the
               // engine agreeing that a formal order was given.
               visualsFor(t);
-              // Then, separately: is this a real order the physiology should
-              // act on? (visuals already ran, so don't repeat them)
-              if (matchesIntervention(t)) submitVoiceOrder(String(text || ''), 'speech', true);
+
+              // THE TEACHING LOOP. Naming an intervention without saying why
+              // does not treat the patient — the attending stops you and asks
+              // for your reasoning. Answer him and the order goes through,
+              // carrying the reason you gave. This is the entire thesis of the
+              // product: reasoning is the skill, the action is just the proof.
+              var isOrder = matchesIntervention(t);
+              var hasWhy = hasRationaleText(t);
+              if (isOrder && hasWhy) {
+                pendingOrder = null;
+                submitVoiceOrder(String(text || ''), 'speech', true);
+              } else if (isOrder) {
+                pendingOrder = String(text || '');
+                challengeForReason();
+              } else if (pendingOrder) {
+                // He asked why; ANY answer counts. Pattern-matching for
+                // "because" rejected perfectly good reasoning like "she has
+                // no pulse", which is exactly the answer he wanted.
+                var joined = pendingOrder + ' because ' + String(text || '').replace(/^because\s+/i, '');
+                pendingOrder = null;
+                submitVoiceOrder(joined, 'speech-answered', true);
+              }
               return;
             }
             // The live voice is the PATIENT in both scenarios (Dr. Okafor only
@@ -7654,6 +7659,24 @@ if (typeof window !== 'undefined') {
   // both describe the same action, so collapse near-duplicates inside a short
   // window rather than double-advancing the clock.
   var lastOrderText = '', lastOrderAt = 0;
+  // An order waiting on its justification, and the attending's challenge.
+  var pendingOrder = null, whyIndex = 0;
+  function hasRationaleText(t) {
+    return /\b(because|since|so that|due to|in case|given|to (?:prevent|treat|reverse|stop|reduce|support|maintain|open|improve|raise|protect|cover)|worried|concerned|suspect|think|looks like|sounds like|she'?s in|it'?s)\b/i
+      .test(String(t || ''));
+  }
+  function challengeForReason() {
+    var src = 'assets/doc/why-' + (whyIndex++ % 4) + '.mp3';
+    appendLog('doctor', 'Why? Talk me through your thinking.');
+    announceSpeaker('DR. OKAFOR');
+    emit('sim-hud', { text: 'DR. OKAFOR: why?  — say your reason', transient: true });
+    window.__crumb('challenge-why');
+    try {
+      if (docAudio) docAudio.pause();
+      docAudio = new Audio(src);
+      docAudio.play().then(function () {}, function () {});
+    } catch (e) {}
+  }
   function submitVoiceOrder(text, source, visualsDone) {
     var full = String(text || '').trim();
     if (!full || !started || reported) return;
@@ -8530,34 +8553,9 @@ if (typeof window !== 'undefined') {
     let patientHeadBone = null;          // GLTF head bone (restlessness anim)
     let patientChestBaseScale = null;
     let fallbackChest = null;            // our own bottom-pivoted chest mesh
-    // Chest-clutch: the scenario and the attending both describe her holding a
-    // fist to her sternum, and the patient mesh is a single pre-posed model
-    // with no skeleton — so the gesture is a separate forearm and fist laid
-    // over her chest. It fades in as she becomes distressed and goes limp the
-    // instant she arrests, which is the whole point: the audience should SEE
-    // her stop fighting.
-    let clutchGroup = null, clutchMat = null;
-    function buildClutch(parent) {
-      clutchGroup = new THREE.Group();
-      clutchMat = std({ color: 0xd9a98c, roughness: 0.68, metalness: 0.0 });
-      clutchMat.transparent = true; clutchMat.opacity = 0;
-      const fore = new THREE.Mesh(G(new THREE.CylinderGeometry(0.043, 0.036, 0.26, 10)), clutchMat);
-      fore.rotation.set(0, 0, 1.15);
-      fore.position.set(0.10, 0.02, 0.10);
-      clutchGroup.add(fore);
-      const fist = new THREE.Mesh(G(new THREE.SphereGeometry(0.055, 14, 12)), clutchMat);
-      fist.scale.set(1, 0.85, 1.1);
-      fist.position.set(-0.02, 0.055, 0.0);
-      clutchGroup.add(fist);
-      // Over the sternum, just above the gown surface.
-      clutchGroup.position.set(BED_X + 0.02, MATTRESS_TOP + 0.30, -1.72);
-      parent.add(clutchGroup);
-    }
-
     const patientWrapper = new THREE.Group();
     patientWrapper.name = 'patientWrapper';
     group.add(patientWrapper);
-    buildClutch(group);
     let patientBaseY = 0;                // wrapper rest height (for breathing bob)
     let patientBaseX = 0;                // wrapper rest x (for restless shifting)
 
@@ -8836,15 +8834,6 @@ if (typeof window !== 'undefined') {
           + 0.006 * unrest * Math.sin(state.breathPhase * 1.7 + 2.1);
         patientWrapper.rotation.z = 0.020 * unrest * Math.sin(state.breathPhase * 0.31 + 0.8);
         patientWrapper.rotation.y = 0.030 * unrest * Math.sin(state.breathPhase * 0.23);
-        if (clutchGroup && clutchMat) {
-          // Hand arrives with the chest pain and drops away at arrest.
-          var wantClutch = unrest * 0.95;
-          clutchMat.opacity += (wantClutch - clutchMat.opacity) * (1 - Math.exp(-1.6 * dt));
-          clutchGroup.visible = clutchMat.opacity > 0.02;
-          clutchGroup.position.y = MATTRESS_TOP + 0.30 + 0.012 * breath01
-            - 0.03 * clutchMat.opacity * (0.5 + 0.5 * Math.sin(state.breathPhase * 0.9));
-          clutchGroup.position.x = BED_X + 0.02 + patientWrapper.position.x - patientBaseX;
-        }
       }
       // Faint blanket rise in sync
       blanket.scale.y = 1 + 0.05 * breath01;
@@ -16781,11 +16770,16 @@ window.MI_SCENARIO = MI_SCENARIO;
     // gave orders and saw nothing happen. Chest height, clear of the bed
     // footprint (bed spans x -0.88..0.08, z -2.35..-0.25).
     var TRAY = opts.tray || { x: 0.58, y: 1.18, z: 0.35 };
+    // Delivery targets sit ON the patient, not inside her. The old values were
+    // below the blanket line (0.79) and inside the body mesh, so a syringe
+    // flew to her thigh and vanished under the gown — it read as the item
+    // disappearing rather than being given. Bed: x -0.4, head z -2.35,
+    // mattress top 0.66; her body surface is around y 0.95-1.05.
     var SITES = opts.sites || {
-      thigh: { x: -0.30, y: 0.80, z: -0.95 },
-      arm:   { x: 0.05,  y: 0.78, z: -1.50 },
-      mouth: { x: -0.40, y: 0.94, z: -2.05 },
-      chest: { x: -0.40, y: 0.92, z: -1.75 }
+      thigh: { x: -0.24, y: 1.00, z: -1.02 },
+      arm:   { x: -0.02, y: 0.98, z: -1.46 },
+      mouth: { x: -0.40, y: 1.00, z: -2.00 },
+      chest: { x: -0.40, y: 1.04, z: -1.72 }
     };
 
     var group = new THREE.Group();
