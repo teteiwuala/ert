@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b28');   // build marker: proves which deploy a run used
+  window.__crumb('boot b29');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4827,10 +4827,31 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   });
   window.addEventListener('sim-case-menu', function () {
     if (!vrui) return;
+    // Equipment buttons are a deliberate safety net: speech recognition can
+    // fail on a noisy demo floor, and the presenter must always be able to
+    // make the sim visibly do something. Each button fires the exact same
+    // events a spoken order does.
     vrui.showPanel('case', {
       title: 'CASE CONTROLS',
       body: 'Right grip: voice on / off',
       buttons: [
+        { label: 'Defib paddles', onSelect: function () {
+            window.dispatchEvent(new CustomEvent('sim-paddles', { detail: { fire: false } }));
+            window.dispatchEvent(new CustomEvent('sim-prop', { detail: { prop: 'defib-pads' } }));
+          } },
+        { label: 'SHOCK — clear!', onSelect: function () {
+            window.dispatchEvent(new CustomEvent('sim-paddles', { detail: { fire: true } }));
+            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'shock at 200 joules because she is in VF' } }));
+          } },
+        { label: 'Epinephrine', onSelect: function () {
+            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'give epinephrine 1 mg IV because she is in cardiac arrest' } }));
+          } },
+        { label: 'Start CPR', onSelect: function () {
+            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'start compressions because she has no pulse' } }));
+          } },
+        { label: 'Oxygen', onSelect: function () {
+            window.dispatchEvent(new CustomEvent('sim-order-text', { detail: { text: 'give oxygen because her sats are dropping' } }));
+          } },
         { label: 'Wait 30 s', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-wait')); } },
         { label: 'End & debrief', onSelect: function () { window.dispatchEvent(new CustomEvent('sim-end-case')); } },
         { label: 'Close', onSelect: function () { if (vrui) vrui.hidePanel('case'); } }
@@ -5104,7 +5125,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 28 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 29 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7198,6 +7219,15 @@ if (typeof window !== 'undefined') {
   window.addEventListener('sim-heart-inspect', function (e) {
     if (!e.detail || !e.detail.structure) return;
     appendLog('cue', 'Inspected on the hologram: ' + e.detail.structure);
+  });
+  // Button-driven orders take the identical path a spoken order does:
+  // visuals off the text, then the engine if it recognises an intervention.
+  window.addEventListener('sim-order-text', function (e) {
+    var txt = e.detail && e.detail.text;
+    if (!txt) return;
+    window.__crumb('order-button');
+    visualsFor(String(txt).toLowerCase());
+    submitVoiceOrder(txt, 'button', true);
   });
   window.addEventListener('sim-wait', function () {
     if (busy || !started) return;
