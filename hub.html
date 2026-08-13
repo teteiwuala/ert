@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b33');   // build marker: proves which deploy a run used
+  window.__crumb('boot b34');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5121,7 +5121,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 33 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 34 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7398,6 +7398,7 @@ if (typeof window !== 'undefined') {
   function beginCase() {
     started = true; reported = false;
     cprOn = false; nudgesFired = {}; arrestAnnounced = false; lastCueKey = '';
+    docSpoken = {}; pendingOrder = null;   // fresh case: coaching may repeat, orders don't carry over
     // Charge-nurse SBAR handoff, spoken aloud (pre-generated TTS asset — the
     // handoffScript text verbatim, in a third voice distinct from the patient
     // and the doctor). This is the in-headset replacement for the DOM brief,
@@ -7671,10 +7672,21 @@ if (typeof window !== 'undefined') {
     announceSpeaker('DR. OKAFOR');
     emit('sim-hud', { text: 'DR. OKAFOR: why?  — say your reason', transient: true });
     window.__crumb('challenge-why');
+    // Ask the live patient to stay quiet for this beat. She hears every word
+    // the trainee says, so without this she answers at the same moment the
+    // attending does and neither is intelligible.
+    hushPatient('The attending is speaking to the nurse right now. Do not say ' +
+      'anything at all until the nurse has answered him.');
     try {
       if (docAudio) docAudio.pause();
       docAudio = new Audio(src);
       docAudio.play().then(function () {}, function () {});
+    } catch (e) {}
+  }
+  function hushPatient(msg) {
+    try {
+      var vb = window.VoiceBridge;
+      if (vb && vb.sendContext) vb.sendContext(msg);
     } catch (e) {}
   }
   function submitVoiceOrder(text, source, visualsDone) {
@@ -7774,10 +7786,16 @@ if (typeof window !== 'undefined') {
       } catch (err) {}
     }, 700);
   }
+  var docSpoken = {};
   function speakDoctor(index, text) {
+    // Hard guard against a line being delivered twice: the queue can be fed
+    // from more than one turn and a repeated coaching prompt sounds broken.
+    if (docSpoken[index]) return;
+    docSpoken[index] = true;
     appendLog('doctor', text);
     var src = (SCN && SCN.doctorAudioPrefix) ? (SCN.doctorAudioPrefix + index + '.mp3') : null;
     if (!src) return;
+    hushPatient('The attending is about to speak to the nurse. Stay silent until he finishes.');
     docQueue.push({ src: src, index: index });
     if (docQueue.length > 3) docQueue.splice(0, docQueue.length - 3);  // stale coaching helps nobody
     pumpDoctor();
@@ -16765,7 +16783,9 @@ window.MI_SCENARIO = MI_SCENARIO;
 
   // id -> presentation. `type` picks the geometry, `site` the delivery target.
   var MEDS = {
-    'epinephrine':      { label: 'EPINEPHRINE 1 mg/mL', type: 'syringe',      color: 0xf2c14e, site: 'thigh' },
+    // IV epinephrine in a cardiac arrest goes into the running line, not the
+    // thigh — that is the auto-injector's route.
+    'epinephrine':      { label: 'EPINEPHRINE 1 mg/mL', type: 'syringe',      color: 0xf2c14e, site: 'arm' },
     'epi-autoinjector': { label: 'EPINEPHRINE AUTO-INJECTOR', type: 'autoinjector', color: 0xe06c3a, site: 'thigh' },
     'aspirin':          { label: 'ASPIRIN 325 mg', type: 'tablet',       color: 0xf4f1e6, site: 'mouth' },
     'nitroglycerin':    { label: 'NITROGLYCERIN SL', type: 'spray',      color: 0xc0392b, site: 'mouth' },
@@ -16790,11 +16810,15 @@ window.MI_SCENARIO = MI_SCENARIO;
     // flew to her thigh and vanished under the gown — it read as the item
     // disappearing rather than being given. Bed: x -0.4, head z -2.35,
     // mattress top 0.66; her body surface is around y 0.95-1.05.
+    // Items must come to REST ABOVE the body, never at its surface — at the
+    // surface they sink into the gown and blanket and read as vanishing.
+    // Her body sits on a 0.66 mattress and stands ~0.45 tall, so ~1.11 is
+    // her surface; these hover a hand's width clear of it.
     var SITES = opts.sites || {
-      thigh: { x: -0.24, y: 1.00, z: -1.02 },
-      arm:   { x: -0.02, y: 0.98, z: -1.46 },
-      mouth: { x: -0.40, y: 1.00, z: -2.00 },
-      chest: { x: -0.40, y: 1.04, z: -1.72 }
+      thigh: { x: -0.24, y: 1.16, z: -1.05 },
+      arm:   { x: 0.02,  y: 1.14, z: -1.48 },
+      mouth: { x: -0.40, y: 1.16, z: -2.00 },
+      chest: { x: -0.40, y: 1.20, z: -1.72 }
     };
 
     var group = new THREE.Group();
