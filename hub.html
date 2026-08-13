@@ -3941,7 +3941,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // seconds of writes, but a request that already left the headset is safe.
     // Temporary debug channel — remove after the Quest crash is solved.
     try {
-      fetch('https://ntfy.sh/ert-quest-blackbox-c7q4x9', {
+      // Topic rotated: the previous one hit ntfy's daily message quota and
+      // began returning 429, so every crumb vanished and the black box went
+      // dark exactly when it was needed most.
+      fetch('https://ntfy.sh/ert-bb-2026a-k8v3', {
         method: 'POST',
         body: (++CRUMB_SEQ) + ' ' + Math.round(performance.now()) + 'ms ' + s,
         keepalive: true
@@ -3970,7 +3973,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b36');   // build marker: proves which deploy a run used
+  window.__crumb('boot b37');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5172,7 +5175,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 36 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 37 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7507,6 +7510,10 @@ if (typeof window !== 'undefined') {
               // for the same order still works and is de-duplicated below.
               var t = String(text || '').toLowerCase();
               window.__crumb('heard:' + t.slice(0, 40));
+              // Show it on the HUD. Without this the trainee cannot tell the
+              // difference between "the sim ignored me" and "the microphone
+              // never heard me" — which are completely different problems.
+              emit('sim-hud', { text: '👂 ' + String(text || '').slice(0, 46), transient: true });
               if (/\b(show|bring up|display|open)\b.*\bheart\b/.test(t)) {
                 emit('sim-heart-show', {}); pushHeartState(PatientLoop.getState());
                 return;
@@ -7578,6 +7585,7 @@ if (typeof window !== 'undefined') {
     emit('sim-heart-show', {});
     PatientLoop.start();   // fires onTurn(seed) itself — no manual render
     startLiveClock();      // the case now runs in real time
+    setTimeout(announceDemoMode, 1200);
   }
 
   function buildHud() {
@@ -7757,6 +7765,13 @@ if (typeof window !== 'undefined') {
   }
   function ackOrder() {
     playDoc('ack-' + (ackIndex++ % 2));
+  }
+  // Visible confirmation that demo mode is actually on — the URL flag was
+  // impossible to verify from inside the headset.
+  function announceDemoMode() {
+    if (!DEMO_MODE) return;
+    emit('sim-hud', { text: '▶ DEMO MODE — 2 orders, then she crashes', transient: true });
+    appendLog('cue', 'Demo mode: the clock is compressed. Give two justified orders and she will arrest on cue.');
   }
   // Demo cue: after the second good order, crash her on cue.
   function demoAdvance() {
