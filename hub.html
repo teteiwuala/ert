@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b34');   // build marker: proves which deploy a run used
+  window.__crumb('boot b35');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5121,7 +5121,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 34 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 35 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -6198,7 +6198,26 @@ if (typeof window !== 'undefined') {
         var arrestOnly = (scenario.arrestOnlyInterventions || []).indexOf(entry.id) !== -1;
         var vNow = gameState.vitals || {};
         var inArrest = (vNow.hr <= 30) || (vNow.sbp <= 40);
-        if (arrestOnly && !inArrest) {
+        // Prerequisites: some steps are only correct once an earlier one has
+        // happened (amiodarone treats SHOCK-REFRACTORY VF, so a shock must
+        // have been delivered first). Declared per intervention as
+        // `requires: ['other-id', ...]`, so the sequence is scenario data
+        // rather than logic buried in the engine.
+        var missing = [];
+        (entry.requires || []).forEach(function (reqId) {
+          var done = (gameState.interventionsTaken || []).some(function (it) {
+            return String(it.name) === String(reqId);
+          });
+          if (!done) missing.push(reqId);
+        });
+        if (missing.length) {
+          var names = missing.map(function (id) {
+            var e2 = (scenarioInterventions() || []).filter(function (x) { return x.id === id; })[0];
+            return e2 ? String(e2.label || id).split('(')[0].split('—')[0].trim() : id;
+          });
+          assessmentParts.push('Out of sequence — ' + String(entry.label || entry.id).split('(')[0].trim() +
+            ' comes after ' + names.join(' and ') + '. Do that first.');
+        } else if (arrestOnly && !inArrest) {
           assessmentParts.push(scenario.prematureInterventionNote ||
             'Not indicated — the patient has a pulse and a perfusing rhythm. Reassess before acting.');
         } else {
@@ -14382,6 +14401,7 @@ const MI_SCENARIO = {
     },
     {
       id: 'epinephrine-iv-1mg',
+      requires: ['start-cpr'],           // ACLS: drugs run during high-quality CPR
       label: 'Epinephrine 1 mg IV/IO, repeat every 3-5 minutes',
       aliases: ['give epi', 'one of epi', 'epinephrine iv', 'push epi',
                 'epi one milligram', 'adrenaline one milligram', 'more epi'],
@@ -14409,6 +14429,7 @@ const MI_SCENARIO = {
     },
     {
       id: 'amiodarone-iv-300',
+      requires: ['defibrillate'],        // "shock-refractory" means a shock came first
       label: 'Amiodarone 300 mg IV bolus for shock-refractory VF',
       aliases: ['give amiodarone', 'amio three hundred', 'amiodarone bolus',
                 'antiarrhythmic', 'lidocaine instead'],
