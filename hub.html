@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b35');   // build marker: proves which deploy a run used
+  window.__crumb('boot b36');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4412,8 +4412,59 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         { detail: { text: '⚡ PADDLES CHARGED — SAY "CLEAR" TO SHOCK', transient: true } }));
     }
   }
+  // Visible discharge over the chest: a burst of arcs plus a bloom, at the
+  // pad sites. The shock is the climax of the case and it used to be a
+  // silent state change.
+  function shockArc() {
+    try {
+      const grp = new THREE.Group();
+      const mat = new THREE.MeshBasicMaterial({ color: 0xbfe9ff, transparent: true,
+        opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+      for (let i = 0; i < 14; i++) {
+        const pts = [];
+        const a = Math.random() * Math.PI * 2, r0 = 0.05 + Math.random() * 0.05;
+        for (let s = 0; s <= 5; s++) {
+          const k = s / 5;
+          pts.push(new THREE.Vector3(
+            Math.cos(a) * r0 * (1 - k) + (Math.random() - 0.5) * 0.05,
+            0.02 + k * 0.16 + (Math.random() - 0.5) * 0.03,
+            Math.sin(a) * r0 * (1 - k) + (Math.random() - 0.5) * 0.05));
+        }
+        const g = new THREE.BufferGeometry().setFromPoints(pts);
+        const ln = new THREE.Line(g, mat);
+        ln.raycast = function () {};
+        grp.add(ln);
+      }
+      const bloomMat = new THREE.SpriteMaterial({ color: 0xdff4ff, transparent: true,
+        opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false });
+      const bloom = new THREE.Sprite(bloomMat);
+      bloom.scale.set(0.55, 0.55, 1); bloom.position.y = 0.06;
+      bloom.raycast = function () {};
+      grp.add(bloom);
+      grp.position.set(-0.40, 1.06, -1.72);   // her chest, above the gown
+      scene.add(grp);
+      let life = 0;
+      const tick = function () {
+        life += 0.033;
+        const k = Math.min(1, life / 0.55);
+        mat.opacity = 0.95 * (1 - k);
+        bloomMat.opacity = 0.85 * (1 - k) * (1 - k);
+        bloom.scale.setScalar(0.55 + k * 0.8);
+        grp.rotation.y += 0.35;
+        if (k < 1) { setTimeout(tick, 33); return; }
+        scene.remove(grp);
+        grp.traverse(function (o) { if (o.geometry) o.geometry.dispose(); });
+        mat.dispose(); bloomMat.dispose();
+      };
+      tick();
+      window.__crumb('shock-arc');
+    } catch (e) {}
+  }
+  window.addEventListener('sim-shock-arc', shockArc);
+
   function firePaddles() {
     if (!paddlesOut) return false;
+    shockArc();
     inputs.forEach(r => {
       if (r.paddle && r.paddle.userData.ring) r.paddle.userData.ring.opacity = 0.95;
     });
@@ -5121,7 +5172,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 35 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 36 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7464,6 +7515,12 @@ if (typeof window !== 'undefined') {
                 emit('sim-heart-hide', {});
                 return;
               }
+              // "show me the debrief" ends the case on the trainee's word.
+              if (/\b(debrief|de-?brief|wrap up|end the (case|scenario))\b/.test(t)) {
+                window.__crumb('voice-debrief');
+                endCase('ended');
+                return;
+              }
               // VISUALS ALWAYS RUN, straight off the raw utterance. They used
               // to be reachable only through a matched order, so saying
               // "charge defibrillator" produced nothing at all — the alias is
@@ -7680,7 +7737,41 @@ if (typeof window !== 'undefined') {
   // window rather than double-advancing the clock.
   var lastOrderText = '', lastOrderAt = 0;
   // An order waiting on its justification, and the attending's challenge.
-  var pendingOrder = null, whyIndex = 0;
+  var pendingOrder = null, whyIndex = 0, ackIndex = 0, demoOrders = 0;
+  // ?demo=1 — a choreographed run for presenting: two orders, then she
+  // crashes on cue about five seconds later. The clinical model is untouched;
+  // only the clock is pushed forward, so everything the audience sees is the
+  // real scenario, just without four minutes of waiting.
+  var DEMO_MODE = (function () {
+    try { return /[?&]demo=1/.test(location.search); } catch (e) { return false; }
+  })();
+  function playDoc(file, thenMs, after) {
+    try {
+      if (docAudio) docAudio.pause();
+      hushPatient('The attending is speaking. Stay completely silent until he finishes.');
+      announceSpeaker('DR. OKAFOR');
+      docAudio = new Audio('assets/doc/' + file + '.mp3');
+      docAudio.play().then(function () {}, function () {});
+    } catch (e) {}
+    if (after) setTimeout(after, thenMs || 1500);
+  }
+  function ackOrder() {
+    playDoc('ack-' + (ackIndex++ % 2));
+  }
+  // Demo cue: after the second good order, crash her on cue.
+  function demoAdvance() {
+    if (!DEMO_MODE) return;
+    demoOrders++;
+    if (demoOrders !== 2) return;
+    setTimeout(function () {
+      if (!started || reported) return;
+      var st = PatientLoop.getState();
+      var need = 205 - ((st && st.timeElapsedSeconds) || 0);
+      window.__crumb('demo-crash');
+      if (need > 0) { autoTick = true; try { PatientLoop.tickTime(need); } catch (e) {} autoTick = false; }
+      setTimeout(function () { playDoc('crash'); }, 700);
+    }, 5200);
+  }
   function hasRationaleText(t) {
     return /\b(because|since|so that|due to|in case|given|to (?:prevent|treat|reverse|stop|reduce|support|maintain|open|improve|raise|protect|cover)|worried|concerned|suspect|think|looks like|sounds like|she'?s in|it'?s)\b/i
       .test(String(t || ''));
@@ -7718,6 +7809,10 @@ if (typeof window !== 'undefined') {
     window.__crumb('order(' + source + ')');
     appendLog('you', '🎤 ' + full);
     if (!visualsDone) visualsFor(full);
+    // The attending acknowledges a justified order — silence after you commit
+    // to something reads as the sim ignoring you.
+    if (source === 'speech-answered' || /\bbecause\b/i.test(full)) setTimeout(ackOrder, 350);
+    demoAdvance();
     Promise.resolve(PatientLoop.sendCommand(full)).catch(function () {});
   }
 
@@ -7858,7 +7953,11 @@ if (typeof window !== 'undefined') {
       appendLog('cue', 'She is unresponsive and pulseless. The monitor shows ' +
         (rhy === 'VF' ? 'ventricular fibrillation — a shockable rhythm.' : 'asystole.'));
     } else if (!arrestedNow && arrestAnnounced) {
+      // ROSC: she has a pulse again. Say so, out loud.
       arrestAnnounced = false;
+      setChip('ROSC — PULSE RESTORED', CY);
+      appendLog('cue', 'Pulse restored. She has a rhythm and a blood pressure again.');
+      setTimeout(function () { playDoc('rosc'); }, 500);
     }
     // Scenario end is driven solely by the loop's onEnd -> finish(); never here.
   }
@@ -7915,6 +8014,7 @@ if (typeof window !== 'undefined') {
       // renders underneath for reading after the session ends.
       emit('sim-debrief', vrDebrief(summary));
       showReport(summary);
+      setTimeout(function () { playDoc('debrief-intro'); }, 600);
       return;
     }
     emit('sim-vitals-hide', {});
