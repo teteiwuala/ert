@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b29');   // build marker: proves which deploy a run used
+  window.__crumb('boot b30');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4333,8 +4333,18 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     ctrl.addEventListener('squeezestart', () => {
       window.__crumb('grip:' + (rec.hand || '?') + (ward ? '' : ' (lobby, ignored)'));
       if (!ward) return;
-      if (rec.hand === 'left') window.dispatchEvent(new CustomEvent('sim-case-menu'));
-      else window.dispatchEvent(new CustomEvent('sim-voice-toggle'));
+      if (rec.hand === 'left') { window.dispatchEvent(new CustomEvent('sim-case-menu')); return; }
+      // Voice is a TOGGLE, and a grip button is easy to squeeze twice — which
+      // opened and instantly closed the mic, so speech was cut to "...".
+      // Ignore repeat squeezes inside 1.5 s and say plainly what state we're
+      // in, because an invisible mic state is unusable in a headset.
+      const now = Date.now();
+      if (now - lastVoiceToggle < 1500) { window.__crumb('grip:right (debounced)'); return; }
+      lastVoiceToggle = now;
+      const on = !(window.VoiceBridge && window.VoiceBridge.isActive());
+      window.dispatchEvent(new CustomEvent('sim-hud', { detail: {
+        text: on ? '🎙 MIC ON — speak now, then pause' : '🎙 MIC OFF', transient: true } }));
+      window.dispatchEvent(new CustomEvent('sim-voice-toggle'));
     });
     // Gloved hand on the GRIP space (where the hand actually is; the
     // controller space above is the aim ray, which sits forward of the fist).
@@ -4375,7 +4385,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   // discharges them. Ordering a shock from across the room never felt like
   // resuscitating anyone — this is the one procedure in the case that should
   // be in the trainee's hands.
-  let paddlesOut = false, paddleTimer = null;
+  let paddlesOut = false, paddleTimer = null, lastVoiceToggle = 0;
   function makePaddle(THREE) {
     const g = new THREE.Group();
     const shell = new THREE.MeshStandardMaterial({ color: 0x1d232a, roughness: 0.55 });
@@ -5125,7 +5135,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 29 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 30 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
