@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b27');   // build marker: proves which deploy a run used
+  window.__crumb('boot b28');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4915,7 +4915,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   });
   window.addEventListener('sim-heart-hide', function () { if (heartViz) heartViz.hide(); });
   window.addEventListener('sim-med', function (e) {
-    if (!medProps || !e.detail) return;
+    if (!e.detail) return;
+    if (!medProps) { window.__crumb('med-DROPPED (no medProps)'); return; }
     try {
       if (e.detail.stage === 'give') medProps.give(e.detail.id);
       else if (medProps.spawn(e.detail.id)) window.__crumb('med:' + e.detail.id);
@@ -5103,7 +5104,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 27 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 28 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7321,8 +7322,10 @@ if (typeof window !== 'undefined') {
     if (/\b(cpr|compress)/.test(t)) { cprOn = true; emit('sim-prop', { prop: 'cpr', on: true }); emit('sim-cpr-view', { on: true }); }
     // Paddles first: charging puts them in the trainee's hands, and "clear"
     // is what actually discharges them — the callout is part of the skill.
-    if (/\b(defib|paddle|charge|pads?)\b/.test(t)) emit('sim-paddles', { fire: false });
-    if (/\b(clear|shocking|shock her|deliver)\b/.test(t)) emit('sim-paddles', { fire: true });
+    // Match on stems, not exact words: people say defib, defibrillator,
+    // defibrillate, paddles, pads, charge, charging.
+    if (/defib|paddle|\bcharg|\bpads?\b/.test(t)) { emit('sim-paddles', { fire: false }); window.__crumb('vis:paddles'); }
+    if (/\bclear\b|shock|\bjoule|\bfire\b/.test(t)) { emit('sim-paddles', { fire: true }); window.__crumb('vis:fire'); }
     if (/\b(defib|shock|joule|charge)/.test(t)) {
       if (cprOn) { cprOn = false; emit('sim-prop', { prop: 'cpr', on: false }); emit('sim-cpr-view', { on: false }); }
       emit('sim-prop', { prop: 'shock' });
@@ -7406,17 +7409,25 @@ if (typeof window !== 'undefined') {
               // intervention aliases here and submitted directly; a tool call
               // for the same order still works and is de-duplicated below.
               var t = String(text || '').toLowerCase();
+              window.__crumb('heard:' + t.slice(0, 40));
               if (/\b(show|bring up|display|open)\b.*\bheart\b/.test(t)) {
                 emit('sim-heart-show', {}); pushHeartState(PatientLoop.getState());
-              } else if (/\b(hide|remove|clear|close)\b.*\bheart\b/.test(t)) {
-                emit('sim-heart-hide', {});
-              } else if (matchesIntervention(t)) {
-                submitVoiceOrder(String(text || ''), 'speech');
-              } else {
-                // Naming a drug without a full order still reaches for it —
-                // the item appears on the tray, ready to be given.
-                medVisuals(t);
+                return;
               }
+              if (/\b(hide|remove|close)\b.*\bheart\b/.test(t)) {
+                emit('sim-heart-hide', {});
+                return;
+              }
+              // VISUALS ALWAYS RUN, straight off the raw utterance. They used
+              // to be reachable only through a matched order, so saying
+              // "charge defibrillator" produced nothing at all — the alias is
+              // "charge the defib" and the engine's vocabulary is not the
+              // trainee's. Reaching for equipment should never depend on the
+              // engine agreeing that a formal order was given.
+              visualsFor(t);
+              // Then, separately: is this a real order the physiology should
+              // act on? (visuals already ran, so don't repeat them)
+              if (matchesIntervention(t)) submitVoiceOrder(String(text || ''), 'speech', true);
               return;
             }
             // The live voice is the PATIENT in both scenarios (Dr. Okafor only
@@ -7549,6 +7560,7 @@ if (typeof window !== 'undefined') {
     for (var i = 0; i < MED_WORDS.length; i++) {
       if (!MED_WORDS[i][1].test(t)) continue;
       var id = MED_WORDS[i][0];
+      window.__crumb('vis:med ' + id);
       emit('sim-med', { id: id, stage: 'spawn' });
       if (GIVE_VERB.test(t)) {
         // Let the item be seen before it flies to the patient.
@@ -7602,7 +7614,7 @@ if (typeof window !== 'undefined') {
   // both describe the same action, so collapse near-duplicates inside a short
   // window rather than double-advancing the clock.
   var lastOrderText = '', lastOrderAt = 0;
-  function submitVoiceOrder(text, source) {
+  function submitVoiceOrder(text, source, visualsDone) {
     var full = String(text || '').trim();
     if (!full || !started || reported) return;
     var now = Date.now();
@@ -7611,7 +7623,7 @@ if (typeof window !== 'undefined') {
     lastOrderText = norm; lastOrderAt = now;
     window.__crumb('order(' + source + ')');
     appendLog('you', '🎤 ' + full);
-    visualsFor(full);
+    if (!visualsDone) visualsFor(full);
     Promise.resolve(PatientLoop.sendCommand(full)).catch(function () {});
   }
 
@@ -12754,7 +12766,13 @@ if (typeof window !== 'undefined') {
   }
 
   function emitTranscript(who, text) {
-    try { cb.onTranscript(who, text); } catch (e) {}
+    // Never swallow silently: a throw in here used to kill every speech-driven
+    // feature with no symptom at all except "nothing happens when I talk".
+    try { cb.onTranscript(who, text); }
+    catch (e) {
+      try { window.__crumb && window.__crumb('TRANSCRIPT-THREW: ' + (e && e.message)); } catch (e2) {}
+      console.warn('[VoiceBridge] onTranscript threw:', e);
+    }
   }
 
   // ---- tool calls -> one natural-language order --------------------------
