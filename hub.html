@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b32');   // build marker: proves which deploy a run used
+  window.__crumb('boot b33');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5121,7 +5121,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 32 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 33 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -13063,6 +13063,11 @@ if (typeof window !== 'undefined') {
 
   // ---- socket message handling (protocol ported verbatim) ----------------
   function handle(msg) {
+    // Surface anything we don't handle: a renamed transcript event is
+    // otherwise completely invisible and looks like "the sim ignores me".
+    if (msg && msg.type && !/^(ping|audio|interruption|agent_response|user_transcript|client_tool_call|conversation_initiation_metadata|agent_response_correction|vad_score)$/.test(msg.type)) {
+      try { window.__crumb && window.__crumb('ws:' + msg.type); } catch (e) {}
+    }
     switch (msg.type) {
       case 'ping':
         if (ws && ws.readyState === 1) {
@@ -13081,10 +13086,20 @@ if (typeof window !== 'undefined') {
         }
         break;
       case 'user_transcript':
-        if (msg.user_transcription_event && msg.user_transcription_event.user_transcript) {
-          emitTranscript('you', msg.user_transcription_event.user_transcript);
+      case 'internal_tentative_agent_response':
+      case 'tentative_user_transcript': {
+        // Be liberal about the payload shape. The strict path
+        // (user_transcription_event.user_transcript) silently dropped every
+        // utterance whenever the field was nested differently — the patient
+        // answered but the SIM never heard a word.
+        var ute = msg.user_transcription_event || msg.user_transcript_event || msg;
+        var utext = ute.user_transcript || ute.transcript || ute.text ||
+                    (typeof msg.user_transcript === 'string' ? msg.user_transcript : '');
+        if (utext && String(utext).trim() && String(utext).trim() !== '...') {
+          emitTranscript('you', String(utext).trim());
         }
         break;
+      }
       case 'client_tool_call': {
         const call = msg.client_tool_call || {};
         try { window.__crumb && window.__crumb('tool:' + (call.tool_name || '?') + (TOOLS[call.tool_name] ? '' : ' (UNROUTED)')); } catch (e) {}
