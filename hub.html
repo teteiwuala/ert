@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b30');   // build marker: proves which deploy a run used
+  window.__crumb('boot b31');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -5135,7 +5135,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 30 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 31 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -8530,10 +8530,36 @@ if (typeof window !== 'undefined') {
     let patientHeadBone = null;          // GLTF head bone (restlessness anim)
     let patientChestBaseScale = null;
     let fallbackChest = null;            // our own bottom-pivoted chest mesh
+    // Chest-clutch: the scenario and the attending both describe her holding a
+    // fist to her sternum, and the patient mesh is a single pre-posed model
+    // with no skeleton — so the gesture is a separate forearm and fist laid
+    // over her chest. It fades in as she becomes distressed and goes limp the
+    // instant she arrests, which is the whole point: the audience should SEE
+    // her stop fighting.
+    let clutchGroup = null, clutchMat = null;
+    function buildClutch(parent) {
+      clutchGroup = new THREE.Group();
+      clutchMat = std({ color: 0xd9a98c, roughness: 0.68, metalness: 0.0 });
+      clutchMat.transparent = true; clutchMat.opacity = 0;
+      const fore = new THREE.Mesh(G(new THREE.CylinderGeometry(0.043, 0.036, 0.26, 10)), clutchMat);
+      fore.rotation.set(0, 0, 1.15);
+      fore.position.set(0.10, 0.02, 0.10);
+      clutchGroup.add(fore);
+      const fist = new THREE.Mesh(G(new THREE.SphereGeometry(0.055, 14, 12)), clutchMat);
+      fist.scale.set(1, 0.85, 1.1);
+      fist.position.set(-0.02, 0.055, 0.0);
+      clutchGroup.add(fist);
+      // Over the sternum, just above the gown surface.
+      clutchGroup.position.set(BED_X + 0.02, MATTRESS_TOP + 0.30, -1.72);
+      parent.add(clutchGroup);
+    }
+
     const patientWrapper = new THREE.Group();
     patientWrapper.name = 'patientWrapper';
     group.add(patientWrapper);
+    buildClutch(group);
     let patientBaseY = 0;                // wrapper rest height (for breathing bob)
+    let patientBaseX = 0;                // wrapper rest x (for restless shifting)
 
     if (opts.patientGLTF && opts.patientGLTF.scene) {
       // Wrap the GLTF root — never overwrite its own matrix/transform.
@@ -8543,6 +8569,7 @@ if (typeof window !== 'undefined') {
         scale: 1
       });
       patientBaseY = patientWrapper.position.y;
+      patientBaseX = patientWrapper.position.x;
       patientWrapper.add(opts.patientGLTF.scene);
 
       const candidateMats = [];
@@ -8799,6 +8826,25 @@ if (typeof window !== 'undefined') {
         // Static GLTF with no usable bone (the pre-posed gowned patient):
         // whole-body rise — 12 mm reads clearly as breathing from bedside.
         patientWrapper.position.y = patientBaseY + 0.012 * breath01;
+        // Restlessness. A frightened, air-hungry patient shifts and squirms;
+        // she was lying perfectly still, which read as a prop. Amplitude
+        // tracks distress (tachycardia) and collapses to zero on arrest, so
+        // the stillness itself becomes the clinical signal.
+        var unrest = THREE.MathUtils.clamp((hr - 85) / 55, 0, 1) * (1 - state.crit);
+        patientWrapper.position.x = patientBaseX
+          + 0.014 * unrest * Math.sin(state.breathPhase * 0.47)
+          + 0.006 * unrest * Math.sin(state.breathPhase * 1.7 + 2.1);
+        patientWrapper.rotation.z = 0.020 * unrest * Math.sin(state.breathPhase * 0.31 + 0.8);
+        patientWrapper.rotation.y = 0.030 * unrest * Math.sin(state.breathPhase * 0.23);
+        if (clutchGroup && clutchMat) {
+          // Hand arrives with the chest pain and drops away at arrest.
+          var wantClutch = unrest * 0.95;
+          clutchMat.opacity += (wantClutch - clutchMat.opacity) * (1 - Math.exp(-1.6 * dt));
+          clutchGroup.visible = clutchMat.opacity > 0.02;
+          clutchGroup.position.y = MATTRESS_TOP + 0.30 + 0.012 * breath01
+            - 0.03 * clutchMat.opacity * (0.5 + 0.5 * Math.sin(state.breathPhase * 0.9));
+          clutchGroup.position.x = BED_X + 0.02 + patientWrapper.position.x - patientBaseX;
+        }
       }
       // Faint blanket rise in sync
       blanket.scale.y = 1 + 0.05 * breath01;
