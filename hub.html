@@ -3970,7 +3970,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return a;
     } catch (e) { return []; }
   })();
-  window.__crumb('boot b25');   // build marker: proves which deploy a run used
+  window.__crumb('boot b26');   // build marker: proves which deploy a run used
 
   // Preload the charge-nurse SBAR handoff line (pre-generated ElevenLabs TTS,
   // played by beginCase when a scenario starts).
@@ -4283,7 +4283,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function pickAt(px, py) {
     ndc.set((px/innerWidth)*2-1, -(py/innerHeight)*2+1);
     rayc.setFromCamera(ndc, camera);
-    if (pInteract && pInteract.pick && pInteract.pick(rayc)) return;   // touch zones first
+    if (heartViz && heartViz.pick && heartViz.pick(rayc)) return;      // heart first (it floats in front)
+    if (pInteract && pInteract.pick && pInteract.pick(rayc)) return;   // then touch zones
     if (ward) return;   // hidden lobby panels still raycast — don't eat clicks inside the ward
     const hit = rayc.intersectObjects(panels.map(p => p.face), false)[0];
     if (hit) selectPanel(panels[hit.object.userData.index]);
@@ -4450,6 +4451,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     tmpM.identity().extractRotation(ctrl.matrixWorld);
     xrRay.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
     xrRay.ray.direction.set(0,0,-1).applyMatrix4(tmpM).normalize();
+    // The heart is inspected before the body zones: it floats between the
+    // trainee and the bed, so a ray through it would otherwise hit the patient.
+    if (heartViz && heartViz.pick && heartViz.pick(xrRay)) return;
     if (pInteract && pInteract.pick && pInteract.pick(xrRay)) return;
     if (ward) return;   // in the ward the lobby panels are hidden, but raycasts still hit them — don't let them eat clicks
     const hit = xrRay.intersectObjects(panels.map(p => p.face), false)[0];
@@ -4934,8 +4938,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     let hover = null;
     for (let i = 0; i < inputs.length; i++) {
       const rec = inputs[i];
-      // Ray is for the lobby only; in the ward you use your hands.
-      if (rec.line) rec.line.visible = !ward && !rec.isHandInput;
+      // Ray is for the lobby only; in the ward you use your hands — EXCEPT
+      // while the heart hologram is up, since it hangs across the room and
+      // an un-aimable feature is an undiscoverable one.
+      var heartUp = !!(heartViz && heartViz.isShown && heartViz.isShown());
+      if (rec.line) rec.line.visible = (!ward || heartUp) && !rec.isHandInput;
       if (!rec.connected || !rec.fingertip || !rec.glove || !rec.glove.visible) { touchLatched[i] = false; continue; }
       rec.fingertip.getWorldPosition(tipWorld);
       const hit = vrui.touchAt(tipWorld);
@@ -5041,7 +5048,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       console.warn('[black-box] previous run crumbs:', a);
       return;
     }
-    setStatus('Hub ready · build 25 — click a module (or press Enter VR in a headset).');
+    setStatus('Hub ready · build 26 — click a module (or press Enter VR in a headset).');
   })();
 })();
 
@@ -7130,6 +7137,12 @@ if (typeof window !== 'undefined') {
       emit('sim-log', { lines: vrLog });
     }, 120);
   }
+  // Anatomy taps are part of the trainee's record: it shows what they went
+  // looking for, and it lands in the exported session alongside their orders.
+  window.addEventListener('sim-heart-inspect', function (e) {
+    if (!e.detail || !e.detail.structure) return;
+    appendLog('cue', 'Inspected on the hologram: ' + e.detail.structure);
+  });
   window.addEventListener('sim-wait', function () {
     if (busy || !started) return;
     PatientLoop.tickTime(30);   // fires onTurn itself
@@ -15487,6 +15500,27 @@ window.MI_SCENARIO = MI_SCENARIO;
     var inner = new THREE.Group(); pulse.add(inner);
     inner.rotation.set(0.10, 0, 0.12);    // slight organic posture tilt
 
+    // ---- tap-to-inspect state ------------------------------------------
+    var picks = [], meshByName = {}, hlIndex = -1, hlPulse = 0;
+    var labelSprite = null, labelTex = null, labelCanvas = null;
+    var flowBlue = null, flowRed = null, flowPhase = 0;
+    var STRUCTURE_NAMES = {
+      VH_F_left_ventricle: 'LEFT VENTRICLE — pumps to the body',
+      VH_F_right_ventricle: 'RIGHT VENTRICLE — pumps to the lungs',
+      VH_F_left_cardiac_atrium: 'LEFT ATRIUM — receives oxygenated blood',
+      VH_F_right_cardiac_atrium: 'RIGHT ATRIUM — receives venous return',
+      VH_F_interventricular_septum: 'INTERVENTRICULAR SEPTUM',
+      VH_F_mitral_valve: 'MITRAL VALVE — left atrium to ventricle',
+      VH_F_tricuspid_valve: 'TRICUSPID VALVE — right atrium to ventricle',
+      VH_F_aortic_valve: 'AORTIC VALVE — ventricle to aorta',
+      VH_F_pulmonary_valve: 'PULMONARY VALVE — ventricle to lungs',
+      VH_F_papillary_muscle_of_heart_ant: 'PAPILLARY MUSCLE — anchors the valve',
+      VH_F_papillary_muscle_of_heart_antlat: 'PAPILLARY MUSCLE — anchors the valve',
+      VH_F_papillary_muscle_of_heart_med: 'PAPILLARY MUSCLE — anchors the valve',
+      VH_F_papillary_muscle_of_heart_pos: 'PAPILLARY MUSCLE — anchors the valve',
+      VH_F_papillary_muscle_of_heart_posmed: 'PAPILLARY MUSCLE — anchors the valve'
+    };
+
     var model = null;
     var baseScale = 1;
     var mats = [];                        // unique GLB materials (expect 1)
@@ -15529,6 +15563,18 @@ window.MI_SCENARIO = MI_SCENARIO;
       var i;
       for (i = 0; i < mats.length; i++) { try { mats[i].dispose(); } catch (e) {} }
       mats.length = 0;
+      // inspect-mode extras (label sprite + the two blood-flow streams)
+      try {
+        if (labelSprite) { root.remove(labelSprite); labelSprite.material.dispose(); }
+        if (labelTex) labelTex.dispose();
+      } catch (e) {}
+      labelSprite = null; labelTex = null; labelCanvas = null;
+      [flowBlue, flowRed].forEach(function (f) {
+        if (!f) return;
+        try { inner.remove(f); f.geometry.dispose(); f.material.dispose(); } catch (e) {}
+      });
+      flowBlue = flowRed = null;
+      picks.length = 0; meshByName = {}; hlIndex = -1;
       glowTex.dispose(); glowMat.dispose();
       if (fill.dispose) { try { fill.dispose(); } catch (e) {} }
     }
@@ -15604,10 +15650,149 @@ window.MI_SCENARIO = MI_SCENARIO;
           o.material = m;
           mats.push(m);
           baseCols.push(m.color.clone());
+          // Every structure is individually pickable; matIndex ties the mesh
+          // back to its own material so a highlight costs no new geometry.
+          o.userData.matIndex = mats.length - 1;
+          o.userData.structure = name;
+          picks.push(o);
+          meshByName[name] = o;
         });
+        buildFlow();
         inner.add(model);
       }, undefined, function () { failToProcedural(); });
     })();
+
+    // ---- blood flow -----------------------------------------------------
+    // Two particle streams following the real circulatory route through the
+    // chambers, with control points read from the meshes' own bounds (the
+    // scan's axis convention is not documented, so nothing is hardcoded).
+    // Deoxygenated blue: RA -> tricuspid -> RV -> pulmonary valve -> lungs.
+    // Oxygenated red: lungs -> LA -> mitral -> LV -> aortic valve -> body.
+    function centerOf(name, out) {
+      var m = meshByName[name];
+      if (!m) return null;
+      return new THREE.Box3().setFromObject(m).getCenter(out || new THREE.Vector3());
+    }
+    function makeStream(curve, colorHex) {
+      var COUNT = 26;
+      var g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(COUNT * 3), 3));
+      var mat = new THREE.PointsMaterial({
+        color: colorHex, size: 0.055, map: glowTex, transparent: true,
+        opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
+        sizeAttenuation: true
+      });
+      var pts = new THREE.Points(g, mat);
+      pts.raycast = function () {};
+      pts.userData.curve = curve;
+      pts.userData.count = COUNT;
+      pts.frustumCulled = false;
+      inner.add(pts);
+      return pts;
+    }
+    function buildFlow() {
+      try {
+        var ra = centerOf('VH_F_right_cardiac_atrium'), tv = centerOf('VH_F_tricuspid_valve');
+        var rv = centerOf('VH_F_right_ventricle'), pv = centerOf('VH_F_pulmonary_valve');
+        var la = centerOf('VH_F_left_cardiac_atrium'), mv = centerOf('VH_F_mitral_valve');
+        var lv = centerOf('VH_F_left_ventricle'), av = centerOf('VH_F_aortic_valve');
+        if (!ra || !rv || !la || !lv) return;
+        var up = new THREE.Vector3(0, 1, 0);
+        var inflow = ra.clone().addScaledVector(up, 0.10);
+        var outflow = (pv || rv).clone().addScaledVector(up, 0.12);
+        var lungRet = (la).clone().addScaledVector(up, 0.10);
+        var aorta = (av || lv).clone().addScaledVector(up, 0.14);
+        flowBlue = makeStream(new THREE.CatmullRomCurve3(
+          [inflow, ra, tv || ra.clone().lerp(rv, 0.5), rv, pv || rv, outflow]), 0x3fa9f5);
+        flowRed = makeStream(new THREE.CatmullRomCurve3(
+          [lungRet, la, mv || la.clone().lerp(lv, 0.5), lv, av || lv, aorta]), 0xff4a4a);
+        setFlowVisible(false);
+      } catch (e) {}
+    }
+    function setFlowVisible(on) {
+      if (flowBlue) flowBlue.visible = !!on;
+      if (flowRed) flowRed.visible = !!on;
+    }
+    function stepFlow(dt) {
+      if (!flowBlue && !flowRed) return;
+      // Flow tracks the physiology: it slows as she becomes ischemic, STOPS
+      // in VF and asystole (fibrillating muscle ejects nothing), and pulses
+      // under CPR — the detail that makes this a readout, not decoration.
+      var m = state.mode, speed;
+      if (m === 'vf' || m === 'asystole') speed = 0;
+      else if (m === 'cpr') speed = 0.28;
+      else if (m === 'ischemia') speed = 0.32;
+      else speed = Math.max(0.18, Math.min(1.2, (state.hr || 72) / 90));
+      flowPhase = (flowPhase + dt * speed * 0.35) % 1;
+      var streams = [flowBlue, flowRed], s, i, k, p, arr;
+      for (s = 0; s < 2; s++) {
+        var st2 = streams[s];
+        if (!st2 || !st2.visible) continue;
+        arr = st2.geometry.attributes.position.array;
+        for (i = 0; i < st2.userData.count; i++) {
+          k = (flowPhase + i / st2.userData.count) % 1;
+          p = st2.userData.curve.getPointAt(k);
+          arr[i * 3] = p.x; arr[i * 3 + 1] = p.y; arr[i * 3 + 2] = p.z;
+        }
+        st2.geometry.attributes.position.needsUpdate = true;
+      }
+    }
+
+    // ---- structure label -------------------------------------------------
+    function ensureLabel() {
+      if (labelSprite) return;
+      labelCanvas = document.createElement('canvas');
+      labelCanvas.width = 512; labelCanvas.height = 96;
+      labelTex = new THREE.CanvasTexture(labelCanvas);
+      labelTex.colorSpace = THREE.SRGBColorSpace;
+      labelTex.generateMipmaps = false;
+      labelTex.minFilter = THREE.LinearFilter;
+      var mt = new THREE.SpriteMaterial({ map: labelTex, transparent: true, depthWrite: false, depthTest: false });
+      // mats/baseCols are index-aligned and walked by the colour easing loop;
+      // the label is not a heart structure, so it is disposed separately in
+      // teardownLocal rather than joining those arrays.
+      labelSprite = new THREE.Sprite(mt);
+      labelSprite.raycast = function () {};
+      labelSprite.scale.set(0.46, 0.086, 1);
+      labelSprite.renderOrder = 20;
+      labelSprite.visible = false;
+      root.add(labelSprite);     // on root: must not spin or squash with the beat
+    }
+    function drawLabel(text) {
+      ensureLabel();
+      var c = labelCanvas.getContext('2d');
+      c.clearRect(0, 0, 512, 96);
+      c.fillStyle = 'rgba(3,16,24,0.86)'; c.fillRect(0, 18, 512, 60);
+      c.strokeStyle = '#00e5ff'; c.lineWidth = 2; c.strokeRect(1, 19, 510, 58);
+      c.fillStyle = '#dff6ff'; c.font = '600 22px "Segoe UI",sans-serif';
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(String(text).slice(0, 42), 256, 48);
+      labelTex.needsUpdate = true;
+      labelSprite.visible = true;
+    }
+
+    // Tap a structure: highlight it, name it, and turn the flow on. Tapping
+    // the same structure again (or empty space) exits inspect mode.
+    function inspect(mesh, worldPoint) {
+      var idx = mesh.userData.matIndex;
+      if (idx === hlIndex) { clearInspect(); return; }
+      hlIndex = idx; hlPulse = 0;
+      var nm = STRUCTURE_NAMES[mesh.userData.structure] || mesh.userData.structure || 'STRUCTURE';
+      drawLabel(nm);
+      try {
+        var lp = root.worldToLocal(worldPoint.clone());
+        labelSprite.position.set(lp.x, lp.y + 0.11, lp.z);
+      } catch (e) { labelSprite.position.set(0, 0.26, 0); }
+      setFlowVisible(true);
+      try {
+        window.dispatchEvent(new CustomEvent('sim-heart-inspect', { detail: { structure: nm } }));
+      } catch (e) {}
+    }
+    function clearInspect() {
+      hlIndex = -1;
+      if (labelSprite) labelSprite.visible = false;
+      setFlowVisible(false);
+    }
 
     // ---- beat + mode animation ---------------------------------------
     // Two-bump "lub-dub": main systolic squeeze then a smaller diastolic
@@ -15674,6 +15859,7 @@ window.MI_SCENARIO = MI_SCENARIO;
         // half-life 0.75 s => ~94% converged in 3 s (the ROSC spec)
         var k = 1 - Math.pow(0.5, dt / 0.75);
         for (i = 0; i < mats.length; i++) {
+          if (i === hlIndex) continue;    // the highlight owns its own emissive
           if (tgtMode === 'isch') tgtCol.copy(baseCols[i]).lerp(COL_ISCH, 0.85);
           else if (tgtMode === 'asys') tgtCol.copy(COL_ASYS);
           else tgtCol.copy(baseCols[i]);
@@ -15723,6 +15909,16 @@ window.MI_SCENARIO = MI_SCENARIO;
       spin.rotation.x = droop + jrx;
       spin.rotation.z = jrz;
       pulse.scale.set(baseScale * sx, baseScale * sy, baseScale * sz);
+
+      // Inspect mode: breathe the highlighted structure's emissive so the
+      // tapped part is unmistakable, and advance the blood-flow particles.
+      if (hlIndex >= 0 && mats[hlIndex]) {
+        hlPulse += dt * 4.2;
+        var glowK = 0.30 + 0.40 * (0.5 + 0.5 * Math.sin(hlPulse));
+        var hm = mats[hlIndex];
+        if (hm.emissive) hm.emissive.copy(hm.color).multiplyScalar(glowK);
+      }
+      stepFlow(dt);
     }
 
     // ---- API -----------------------------------------------------------
@@ -15743,6 +15939,17 @@ window.MI_SCENARIO = MI_SCENARIO;
         showDir = -1;
       },
       isShown: function () { return shown; },
+      // Tap-to-inspect. Called from the pick paths BEFORE the patient zones,
+      // and only on a deliberate tap — an 86k-triangle raycast has no BVH
+      // here and must never run on a hover path.
+      pick: function (raycaster) {
+        if (!shown || !model || fallback || !picks.length) return false;
+        var h = raycaster.intersectObjects(picks, false)[0];
+        if (!h) return false;
+        inspect(h.object, h.point);
+        return true;
+      },
+      clearInspect: clearInspect,
       setState: setState,
       update: update,
       dispose: function () {
